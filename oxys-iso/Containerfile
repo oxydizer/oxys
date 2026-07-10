@@ -1,0 +1,53 @@
+# OxysOS catalyst build image
+# ---------------------------------------------------------------------------
+# A Gentoo stage3 with catalyst pre-installed, so entering the build
+# environment is instant instead of re-running emerge-webrsync + a catalyst
+# compile in every throwaway container.
+#
+# Build + run via scripts/enter-container.sh (rootful podman, loop passthrough).
+# Manual build:  sudo podman build -t localhost/oxys-catalyst:latest .
+# ---------------------------------------------------------------------------
+FROM docker.io/gentoo/stage3:amd64-openrc
+
+# catalyst is ~amd64 (testing) on a stable stage3, and pulls two USE flags that
+# aren't on by default. These are the keyword/USE changes surfaced by emerge;
+# they live in the package.* DIRECTORIES that the stage3 ships.
+RUN echo 'dev-util/catalyst ~amd64' > /etc/portage/package.accept_keywords/catalyst \
+ && printf '%s\n' \
+      '>=sys-apps/util-linux-2.41.4-r1 python' \
+      '>=sys-boot/grub-2.14-r5 grub_platforms_efi-32' \
+      > /etc/portage/package.use/catalyst
+
+# Sync portage and install catalyst. The gentoo repo tree is kept in the image
+# (it is only needed to install/maintain catalyst itself; the actual ISO build
+# uses catalyst's own repo snapshots, not this tree).
+RUN emerge-webrsync \
+ && emerge -j --quiet-build dev-util/catalyst \
+ && rm -rf /var/cache/distfiles/*
+
+# The default catalyst.conf already sets storedir="/var/tmp/catalyst", which is
+# where enter-container.sh bind-mounts host ~/catalyst. Nothing to change.
+
+# Install our kmerge.sh override (see catalyst-overrides/kmerge.sh for why)
+# over catalyst's own copy, so the ISO build never emerges/compiles its own
+# kernel or zfs-kmod -- it injects oxys-build's tagged tarballs instead.
+# Path VERIFIED against catalyst's documented default sharedir; if this COPY
+# fails on a catalyst version bump, confirm the real path with:
+#   equery files dev-util/catalyst | grep kmerge.sh
+COPY catalyst-overrides/kmerge.sh /usr/share/catalyst/targets/support/kmerge.sh
+RUN chmod 0755 /usr/share/catalyst/targets/support/kmerge.sh
+
+# Boot straight into the live image with no GRUB menu. catalyst's
+# iso-bootloader-setup.sh writes `set default=0` + `set timeout=10` into the
+# ISO's grub.cfg; forcing the timeout to 0 makes GRUB boot entry 0 immediately
+# without displaying the menu. This is a one-line value change, so we patch the
+# stock script in place rather than forking it (unlike kmerge.sh, which rewrites
+# real logic). Fail the image build LOUDLY if the anchor line ever disappears
+# upstream -- otherwise the patch would silently no-op and the menu would return.
+RUN f=/usr/share/catalyst/targets/support/iso-bootloader-setup.sh; \
+    grep -Eq 'set timeout=[0-9]+' "$f" \
+      && sed -i -E 's/set timeout=[0-9]+/set timeout=0/g' "$f" \
+      || { echo "ERROR: no 'set timeout=' line in $f; the boot-straight-in patch needs revisiting for this catalyst version." >&2; exit 1; }
+
+WORKDIR /oxys
+CMD ["bash"]

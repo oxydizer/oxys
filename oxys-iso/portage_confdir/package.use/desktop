@@ -1,0 +1,13 @@
+# niri: screen-capture support (pipewire-backed screencast portal path). Matches
+# oxys-installer/configs/desktop.rs, which sets the screencast use flag on niri.
+gui-wm/niri screencast
+
+# freetype<->harfbuzz have a circular dependency, so the profile leaves freetype
+# built without harfbuzz by default. pango (via pangomm -> gtkmm -> pavucontrol)
+# requires freetype[harfbuzz], so turn it on -- the standard resolution.
+media-libs/freetype harfbuzz
+
+# NOTE: the earlier per-package X toggles (gtk+/gtk -X, cairo/libglvnd +X,
+# libepoxy) are gone. X is now on globally (make.conf + livecd/use), so the whole
+# GTK/GL/*mm graph is X-consistent -- firefox-bin's gtk+3[X]/cairo[X] and the
+# gtkmm C++ bindings all resolve without piecemeal overrides.

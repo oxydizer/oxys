@@ -1,0 +1,12 @@
+[package]
+name = "oxys-login"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+crossterm = { workspace = true }
+libc = "0.2"
+pam = "0.8"
+ratatui = { workspace = true }
+uzers = "0.12"

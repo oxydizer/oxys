@@ -1,0 +1,8 @@
+# Intel 12th/13th gen focused kernel config.
+# Upstream Linux 6.19 x86 Kconfig does not expose CONFIG_MALDERLAKE.
+# If a later patched tree adds a specific Alder Lake symbol, set it here.
+
+CONFIG_DRM_I915=y
+CONFIG_DRM_AMDGPU=n
+CONFIG_INTEL_IDLE=y
+CONFIG_INTEL_PSTATE=y

@@ -1,0 +1,31 @@
+[package]
+name = "oxys"
+version = "0.1.0"
+edition = "2024"
+description = "Declarative manifest/resolver/CLI for a Rust-first, Gentoo/Portage-based Linux system"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/oxydizer/oxys"
+readme = "OVERVIEW.md"
+keywords = ["gentoo", "portage", "package-manager", "linux"]
+categories = ["command-line-utilities", "os::linux-apis"]
+exclude = [
+    ".oxys/**",
+]
+
+# Deps are pinned literally (not `{ workspace = true }`) on purpose: this crate
+# is staged standalone onto the live ISO for on-target config compilation (see
+# oxys-iso/scripts/build-installer-overlay.sh), where there's no parent
+# workspace to inherit from. Keep in sync with the root [workspace.dependencies]
+# table when bumping a version here.
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+colored = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+toml = "1"
+thiserror = "2"
+sha2 = "0.11"
+
+[dev-dependencies]
+tempfile = "3"

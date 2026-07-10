@@ -1,0 +1,7 @@
+# Extra atoms for the "generic" build profile (see oxys-build-packages.sh),
+# on top of NATIVE_PACKAGES/V3_GENERIC_EXTRAS/KERNEL_PACKAGES/FIREFOX_ATOM,
+# which are already hard-coded there. One real atom per line; transitive
+# dependencies (glibc, mesa's own dep chain, gtk, wayland, etc.) are not
+# listed individually here -- `emerge` resolves and fetches those itself
+# (from the binhost when the generic profile's PORTAGE_BINHOST covers them).
+sys-apps/zram-generator

@@ -1,0 +1,5 @@
+# OxysOS live ISO networking.
+# Keep NetworkManager console-first: WiFi plus CLI/TUI tools, without GTK/Qt
+# frontends. Gentoo exposes nmcli/nmtui under the package-local `tools` flag.
+net-misc/networkmanager wifi tools
+net-wireless/wpa_supplicant dbus

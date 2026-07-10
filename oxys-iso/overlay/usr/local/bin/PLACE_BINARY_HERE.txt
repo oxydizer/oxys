@@ -1,0 +1,15 @@
+Drop your standalone Rust installer binary here, named exactly `oxys-installer`
+(this placeholder file can be deleted). Everything under overlay/ is copied
+verbatim onto the live root filesystem by catalyst's `livecd/overlay`, so:
+
+    overlay/usr/local/bin/oxys-installer  ->  /usr/local/bin/oxys-installer
+
+The normal ISO wrapper does this automatically. To refresh it manually:
+
+    rustup target add x86_64-unknown-linux-musl
+    cargo build --manifest-path oxys-installer/Cargo.toml \
+       --release --target x86_64-unknown-linux-musl
+    cp oxys-installer/target/x86_64-unknown-linux-musl/release/oxys-installer \
+       oxys-iso/overlay/usr/local/bin/oxys-installer
+
+fsscript.sh chmods it +x inside the chroot, so file mode here doesn't matter.

@@ -1,0 +1,5 @@
+# Generic x86-64-v3 fallback config.
+# Upstream Linux 6.19 x86 Kconfig does not expose CONFIG_MX86_64_V3.
+
+CONFIG_DRM_I915=y
+CONFIG_DRM_AMDGPU=y

@@ -1,0 +1,19 @@
+# Build context excludes for `podman build` (Containerfile).
+# The Containerfile COPYs nothing, so this is purely to keep the context small
+# and the build fast — none of these belong in an image layer anyway.
+
+# catalyst-rendered specs / work dir
+.build/
+
+# local ISO output fallback dir + any stray build artifacts
+out/
+*.iso
+*.ISO
+
+# QEMU install-target / persist disks created by scripts/run-qemu.sh
+*.qcow2
+
+# editor / VCS / tooling cruft
+.git/
+.claude/
+*.swp

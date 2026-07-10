@@ -1,0 +1,14 @@
+# Keywording for the baked desktop stack (see specs/installcd-stage1.spec).
+# GURU + oxys-overlay packages, and noctalia's live ebuild, are unkeyworded, so
+# they need `**`. The newer main-tree Wayland tools are ~amd64 on this stable
+# profile. NOTE: the first bake build may surface additional ~amd64 transitive
+# deps to add here -- that's expected for a first pass.
+gui-wm/niri **
+gui-shells/noctalia **
+gui-apps/xwayland-satellite **
+gui-apps/wlsunset **
+gui-apps/foot ~amd64
+gui-apps/wl-clipboard ~amd64
+
+# Transitive ~amd64 deps surfaced by the bake (expected on a first desktop pass).
+dev-cpp/sdbus-c++ ~amd64  # noctalia

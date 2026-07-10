@@ -1,0 +1,18 @@
+FROM docker.io/gentoo/stage3:amd64-systemd
+
+ENV OXYS_ARCH=v3
+ENV OXYS_MARCH=x86-64-v3
+ENV OXYS_BUILD_PROFILE=generic
+ENV OXYS_WORK_ROOT=/work
+ENV OXYS_SOURCE_ROOT=/src
+ENV OXYS_OUTPUT_ROOT=/out
+
+RUN mkdir -p /work /out /etc/portage
+RUN mkdir -p /etc/portage/package.mask && echo "sys-kernel/gentoo-sources" >> /etc/portage/package.mask/no-kernel
+
+COPY . /work
+RUN chmod +x /work/scripts/oxys-entrypoint.sh /work/scripts/oxys-build-packages.sh
+
+WORKDIR /work
+ENTRYPOINT ["/work/scripts/oxys-entrypoint.sh"]
+CMD []

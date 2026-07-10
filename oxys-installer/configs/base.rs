@@ -1,0 +1,48 @@
+use oxys::prelude::*;
+
+pub fn config() -> Oxys {
+    Oxys {
+        os: Os {
+            hostname: "oxys".into(),
+            timezone: "Europe/London".into(),
+            locale: "en_US.UTF-8".into(),
+            shell: Shell::Bash,
+            libc: Libc::Glibc,
+        },
+        disk: Disk {
+            // Whole-disk ext4: EFI system partition + a single ext4 root
+            // filling the drive. The installer supplies `device`.
+            layout: DiskLayout::Ext4,
+            ext4: Ext4Options {
+                separate_home: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        hardware: Hardware {
+            gpu: detect_gpu(),
+            power: match (is_laptop(), is_vendor("asus")) {
+                (true, true) => Power::AsusCtl,
+                (true, false) => Power::Tlp,
+                (false, _) => Power::None,
+            },
+        },
+        init_system: InitSystem::Openrc,
+        prefer_binary: true,
+        packages: vec![
+            // Base CLI tooling — present on the ISO and rsync'd to the target,
+            // listed here so they're tracked in @world and kept across updates.
+            Package::new("net-misc/curl"),
+            Package::new("dev-vcs/git"),
+            Package::new("www-client/firefox-bin"),
+            Package::new("media-video/pipewire"),
+        ],
+        services: oxys::services! {
+            enabled: ["NetworkManager", "sshd"],
+            disabled: ["lvm2-monitor", "multipathd"],
+        },
+        ..Default::default()
+    }
+}
+
+oxys::main!(config);
