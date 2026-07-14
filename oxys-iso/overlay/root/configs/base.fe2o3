@@ -20,7 +20,7 @@ pub fn config() -> Oxys {
             ..Default::default()
         },
         hardware: Hardware {
-            gpu: detect_gpu(),
+            graphics: detect_graphics(),
             power: match (is_laptop(), is_vendor("asus")) {
                 (true, true) => Power::AsusCtl,
                 (true, false) => Power::Tlp,
@@ -28,6 +28,10 @@ pub fn config() -> Oxys {
             },
         },
         init_system: InitSystem::Openrc,
+        session: Session {
+            mode: SessionMode::Text,
+            ..Default::default()
+        },
         prefer_binary: true,
         packages: vec![
             // Base CLI tooling — present on the ISO and rsync'd to the target,

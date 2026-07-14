@@ -19,6 +19,8 @@
 #   OXYS_ARCH           Forwarded into the container for build.sh (required by
 #                        build.sh; no default here — see oxys-iso/README.md).
 #   OXYS_KERNEL_BUILD_ID Forwarded into the container for build.sh (optional).
+#   OXYS_GRAPHICS_MANIFEST Generated manifest.toml used to derive matching
+#                        Mesa and kernel DRM build inputs before entering.
 #   OXYS_TREEISH        Forwarded into the container for build.sh (optional).
 #   OXYS_GIT_REFRESH=0  Reuse all prefetched Git commits without attempting to
 #                       update them from their upstream repositories.
@@ -52,6 +54,29 @@ case "${1:-}" in
     *)          CMD=("$@") ;;
 esac
 
+if [[ -n "${OXYS_GRAPHICS_MANIFEST:-}" ]]; then
+    if [[ -n "${OXYS_VIDEO_CARDS:-}" || -n "${OXYS_DRM_DRIVERS:-}" ]]; then
+        echo "ERROR: OXYS_GRAPHICS_MANIFEST cannot be combined with explicit OXYS_VIDEO_CARDS/OXYS_DRM_DRIVERS." >&2
+        exit 1
+    fi
+    oxys_bin="${OXYS_BIN:-${MONOREPO_ROOT}/target/debug/oxys}"
+    if [[ ! -x "${oxys_bin}" ]]; then
+        cargo build --manifest-path "${MONOREPO_ROOT}/Cargo.toml" -p oxys --bin oxys
+    fi
+    policy="$("${oxys_bin}" graphics-build-policy "${OXYS_GRAPHICS_MANIFEST}")"
+    eval "${policy}"
+    export OXYS_VIDEO_CARDS OXYS_DRM_DRIVERS
+    echo ">> resolved graphics build policy from ${OXYS_GRAPHICS_MANIFEST}"
+fi
+
+GRAPHICS_ENV_ARGS=()
+if [[ -n "${OXYS_VIDEO_CARDS:-}" ]]; then
+    GRAPHICS_ENV_ARGS+=(-e "OXYS_VIDEO_CARDS=${OXYS_VIDEO_CARDS}")
+fi
+if [[ -n "${OXYS_DRM_DRIVERS:-}" ]]; then
+    GRAPHICS_ENV_ARGS+=(-e "OXYS_DRM_DRIVERS=${OXYS_DRM_DRIVERS}")
+fi
+
 # --- refresh generated payloads before the container sees the repo -----------
 if [[ "${CMD[0]}" == "/oxys/oxys-iso/build.sh" ]]; then
     # Fetch live sources before the expensive catalyst stage. If DNS is down
@@ -82,6 +107,7 @@ exec "${PODMAN[@]}" run --privileged --rm -it \
     -v /dev:/dev \
     -v "${MONOREPO_ROOT}:/oxys:Z" \
     -v "${CATALYST_DIR}:/var/tmp/catalyst:Z" \
+    "${GRAPHICS_ENV_ARGS[@]}" \
     ${OXYS_ARCH:+-e OXYS_ARCH="${OXYS_ARCH}"} \
     ${OXYS_KERNEL_BUILD_ID:+-e OXYS_KERNEL_BUILD_ID="${OXYS_KERNEL_BUILD_ID}"} \
     ${OXYS_TREEISH:+-e OXYS_TREEISH="${OXYS_TREEISH}"} \

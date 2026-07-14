@@ -40,6 +40,34 @@ install -m 0644 "${INSTALLER_DIR}/configs/custom.fe2o3" "${OVERLAY_CONFIG_DIR}/c
 echo ">> refreshed ISO installer overlay: ${OVERLAY_BIN}"
 echo ">> refreshed ISO config overlay: ${OVERLAY_CONFIG_DIR}"
 
+# --- oxys CLI: the declarative package manager, shipped on PATH -------------
+# The `oxys` binary (compile / check / install / ... subcommands) is what the
+# user runs on the live ISO AND the installed system to drive the declarative
+# workflow. It was never baked in before -- only the crate SOURCE was staged for
+# the on-target config compile below -- so `oxys` was absent from PATH. Build it
+# here exactly like the installer and drop it into /usr/local/bin (already on
+# PATH). The overlay is baked into the live squashfs and also rsynced onto the
+# target by the installer, so `oxys` is on PATH in both.
+#
+# Static musl (like oxys-installer, NOT dynamic like oxys-login): the CLI only
+# shells out to external tools (emerge, cargo, useradd) rather than dlopen'ing
+# NSS/PAM, so it needs no dynamic glibc -- and a static build sidesteps the
+# host-vs-target glibc-skew caveat documented for oxys-login below.
+#
+# This is the CLI binary only; the oxys *library* source is still staged
+# separately (next section) because oxys::compile builds the user's config
+# against the crate as a library.
+OXYS_CLI_BIN="${CARGO_TARGET_ROOT}/${TARGET}/release/oxys"
+OVERLAY_OXYS_CLI="${REPO_DIR}/overlay/usr/local/bin/oxys"
+
+echo ">> building oxys CLI (${TARGET})"
+cargo build \
+	--manifest-path "${MONOREPO_ROOT}/oxys/Cargo.toml" \
+	--release \
+	--target "${TARGET}"
+install -D -m 0755 "${OXYS_CLI_BIN}" "${OVERLAY_OXYS_CLI}"
+echo ">> refreshed ISO oxys CLI overlay: ${OVERLAY_OXYS_CLI}"
+
 # --- on-target config compiler payload -------------------------------------
 # The installer compiles the user's Rust config into manifest.toml *on the live
 # system* (oxys::compile). That needs the oxys crate source, its dependencies

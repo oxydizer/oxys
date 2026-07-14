@@ -112,11 +112,20 @@ shopt -u nullglob
 
 KERNEL_RELEASE="$(metadata_field "${KERNEL_METADATA}" kernel_release)"
 ZFS_KMOD_KERNEL_RELEASE="$(metadata_field "${ZFS_KMOD_METADATA}" kernel_release)"
+KERNEL_DRM_DRIVERS="$(metadata_field "${KERNEL_METADATA}" drm_drivers)"
 
 [[ -n "${KERNEL_RELEASE}" ]] || die "kernel metadata ${KERNEL_METADATA} has no kernel_release field."
 [[ "${KERNEL_RELEASE}" == "${ZFS_KMOD_KERNEL_RELEASE}" ]] || die "kernel/zfs-kmod pairing check failed: kernel_release mismatch (kernel=${KERNEL_RELEASE}, zfs-kmod=${ZFS_KMOD_KERNEL_RELEASE}) for build_id=${BUILD_ID}. This should be impossible for a single build_id -- do not use these artifacts."
 [[ "${KERNEL_RELEASE}" == *-oxys ]] || die "kernel release '${KERNEL_RELEASE}' is not OxysOS-branded (expected an -oxys suffix). Rebuild the kernel before building the ISO."
 [[ "${KERNEL_RELEASE}" != *gentoo* ]] || die "kernel release '${KERNEL_RELEASE}' still contains 'gentoo'. Rebuild the kernel before building the ISO."
+
+if [[ -n "${OXYS_DRM_DRIVERS:-}" ]]; then
+	requested=" ${OXYS_DRM_DRIVERS//,/ } "
+	available=" ${KERNEL_DRM_DRIVERS} "
+	for driver in ${requested}; do
+		[[ "${available}" == *" ${driver} "* ]] || die "kernel build ${BUILD_ID} lacks requested DRM driver '${driver}' (built: ${KERNEL_DRM_DRIVERS:-unrecorded}). Rebuild oxys-build with matching OXYS_DRM_DRIVERS."
+	done
+fi
 
 cat <<EOF
 OXYS_RESOLVED_ARCH=${ARCH}

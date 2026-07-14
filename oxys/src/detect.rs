@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::manifest::{Gpu, GpuVendor, SwapConfig, GB};
+use crate::manifest::{GB, Gpu, GpuVendor, Graphics, SwapConfig};
 
 const DRM_PATH: &str = "/sys/class/drm";
 const POWER_SUPPLY_PATH: &str = "/sys/class/power_supply";
@@ -18,6 +18,11 @@ pub struct DetectedDisk {
 
 pub fn detect_gpu() -> Gpu {
     detect_gpu_from_drm_vendors().unwrap_or_else(detect_gpu_from_drm_entries)
+}
+
+/// Detects the host GPU and expresses it through the current graphics policy.
+pub fn detect_graphics() -> Graphics {
+    detect_gpu().into()
 }
 
 pub fn detect_igpu() -> Option<GpuVendor> {

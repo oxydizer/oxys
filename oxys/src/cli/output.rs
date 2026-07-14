@@ -1,7 +1,7 @@
 use std::io;
 
 use colored::Colorize;
-use oxys::{diff::PackageChange, use_resolver::PortagePlan, Package};
+use oxys::{Package, diff::PackageChange, use_resolver::PortagePlan};
 
 use crate::Result;
 

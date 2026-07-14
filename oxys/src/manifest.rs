@@ -15,15 +15,18 @@ pub use disk::{
 pub(crate) use packages::PlannerManifest;
 pub use packages::{ManifestPackage, Package};
 pub use settings::{
-    AudioStack, Bootloader, DiskLayout, DisplayStack, Encryption, Gpu, GpuVendor, JournalStorage,
-    Libc, MakeOpts, Password, Power, Shell, Username,
+    AudioStack, Bootloader, Compositor, DesktopShell, DiskLayout, DisplayStack, Drm, DrmDriver,
+    DrmDrivers, Encryption, Gpu, GpuVendor, Graphics, JournalStorage, Libc, LoginFrontend,
+    MakeOpts, MesaGraphics, Nvidia, NvidiaDriver, Password, Power, PrimeMode, SeatBackend, Session,
+    SessionMode, SessionTracker, SessionUser, Shell, SoftwareRenderer, Username, VideoCard,
+    VideoCards, VmGraphics,
 };
 
 pub const MB: u64 = 1024 * 1024;
 pub const GB: u64 = 1024 * MB;
 
 /// User-facing declarative system definition.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct SystemManifest {
     #[serde(default)]
     pub os: Os,
@@ -50,11 +53,17 @@ pub struct SystemManifest {
     #[serde(default)]
     pub audio_stack: Option<AudioStack>,
     #[serde(default)]
+    pub session: Session,
+    #[serde(default)]
     pub prefer_binary: bool,
     #[serde(default)]
     pub services: Services,
     #[serde(default)]
     pub users: Vec<User>,
+    /// Deserialization-only provenance for the retired `hardware.gpu` field.
+    #[doc(hidden)]
+    #[serde(skip)]
+    pub legacy_gpu: Option<Gpu>,
 }
 
 pub type Oxys = SystemManifest;
@@ -120,12 +129,118 @@ pub struct Os {
     pub libc: Libc,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct Hardware {
     #[serde(default)]
-    pub gpu: Gpu,
+    pub graphics: Graphics,
     #[serde(default)]
     pub power: Power,
+}
+
+#[derive(Deserialize, Default)]
+struct HardwareCompat {
+    #[serde(default)]
+    graphics: Option<Graphics>,
+    #[serde(default)]
+    gpu: Option<Gpu>,
+    #[serde(default)]
+    power: Power,
+}
+
+impl HardwareCompat {
+    fn resolve<E: serde::de::Error>(self) -> Result<(Hardware, Option<Gpu>), E> {
+        if self.graphics.is_some() && self.gpu.is_some() {
+            return Err(E::custom(
+                "hardware.graphics and retired hardware.gpu cannot both be set",
+            ));
+        }
+        let legacy_gpu = self.gpu;
+        let graphics = self
+            .graphics
+            .unwrap_or_else(|| legacy_gpu.clone().map(Into::into).unwrap_or_default());
+        Ok((
+            Hardware {
+                graphics,
+                power: self.power,
+            },
+            legacy_gpu,
+        ))
+    }
+}
+
+impl<'de> Deserialize<'de> for Hardware {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = HardwareCompat::deserialize(deserializer)?;
+        value.resolve().map(|(hardware, _)| hardware)
+    }
+}
+
+impl<'de> Deserialize<'de> for SystemManifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize, Default)]
+        struct SystemManifestCompat {
+            #[serde(default)]
+            os: Os,
+            #[serde(default)]
+            disk: Disk,
+            #[serde(default)]
+            hardware: HardwareCompat,
+            #[serde(default)]
+            kernel: Kernel,
+            #[serde(default)]
+            journal: Journal,
+            #[serde(default)]
+            environment: Vec<String>,
+            #[serde(default)]
+            packages: Vec<Package>,
+            #[serde(default)]
+            compiler: Compiler,
+            #[serde(default)]
+            init_system: InitSystem,
+            #[serde(default)]
+            bootloader: Option<Bootloader>,
+            #[serde(default)]
+            display_stack: Option<DisplayStack>,
+            #[serde(default)]
+            audio_stack: Option<AudioStack>,
+            #[serde(default)]
+            session: Session,
+            #[serde(default)]
+            prefer_binary: bool,
+            #[serde(default)]
+            services: Services,
+            #[serde(default)]
+            users: Vec<User>,
+        }
+
+        let value = SystemManifestCompat::deserialize(deserializer)?;
+        let (hardware, legacy_gpu) = value.hardware.resolve()?;
+        Ok(Self {
+            os: value.os,
+            disk: value.disk,
+            hardware,
+            kernel: value.kernel,
+            journal: value.journal,
+            environment: value.environment,
+            packages: value.packages,
+            compiler: value.compiler,
+            init_system: value.init_system,
+            bootloader: value.bootloader,
+            display_stack: value.display_stack,
+            audio_stack: value.audio_stack,
+            session: value.session,
+            prefer_binary: value.prefer_binary,
+            services: value.services,
+            users: value.users,
+            legacy_gpu,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -337,27 +452,19 @@ mod tests {
     }
 
     #[test]
-    fn gpu_serializes_single_vendor_as_string() {
+    fn graphics_round_trips_through_toml() {
         let manifest = SystemManifest {
             hardware: Hardware {
-                gpu: Gpu::Single(GpuVendor::Amd),
-                ..Hardware::default()
-            },
-            ..SystemManifest::default()
-        };
-
-        let toml = toml::to_string(&manifest).expect("manifest should serialize");
-
-        assert!(toml.contains("gpu = \"amd\""));
-    }
-
-    #[test]
-    fn gpu_serializes_hybrid_as_table() {
-        let manifest = SystemManifest {
-            hardware: Hardware {
-                gpu: Gpu::Hybrid {
-                    igpu: GpuVendor::Amd,
-                    dgpu: GpuVendor::Nvidia,
+                graphics: Graphics {
+                    mesa: MesaGraphics {
+                        video_cards: VideoCards::Explicit(vec![
+                            VideoCard::Amdgpu,
+                            VideoCard::Radeonsi,
+                        ]),
+                        ..MesaGraphics::default()
+                    },
+                    vm_support: VmGraphics::Virgl,
+                    ..Graphics::default()
                 },
                 ..Hardware::default()
             },
@@ -365,10 +472,10 @@ mod tests {
         };
 
         let toml = toml::to_string(&manifest).expect("manifest should serialize");
-
-        assert!(toml.contains("[hardware.gpu]"));
-        assert!(toml.contains("igpu = \"amd\""));
-        assert!(toml.contains("dgpu = \"nvidia\""));
+        assert!(toml.contains("[hardware.graphics.mesa.video_cards]"));
+        assert!(!toml.contains("hardware.gpu"));
+        let parsed: SystemManifest = toml::from_str(&toml).expect("manifest should deserialize");
+        assert_eq!(parsed.hardware.graphics, manifest.hardware.graphics);
     }
 
     #[test]
@@ -381,7 +488,10 @@ mod tests {
         )
         .expect("manifest should parse");
 
-        assert_eq!(manifest.hardware.gpu, Gpu::Single(GpuVendor::Nvidia));
+        assert_eq!(
+            manifest.hardware.graphics.nvidia.unwrap().prime,
+            PrimeMode::Primary
+        );
     }
 
     #[test]
@@ -395,13 +505,38 @@ mod tests {
         )
         .expect("manifest should parse");
 
-        assert_eq!(
-            manifest.hardware.gpu,
-            Gpu::Hybrid {
-                igpu: GpuVendor::Amd,
-                dgpu: GpuVendor::Nvidia,
-            }
+        let graphics = manifest.hardware.graphics;
+        assert_eq!(graphics.nvidia.unwrap().prime, PrimeMode::Offload);
+        assert!(
+            matches!(graphics.mesa.video_cards, VideoCards::Explicit(ref cards) if cards.contains(&VideoCard::Amdgpu))
         );
-        assert!(manifest.hardware.gpu.prime_offloading_enabled());
+    }
+
+    #[test]
+    fn session_rust_dsl_round_trips_through_toml() {
+        let manifest = SystemManifest {
+            session: Session {
+                mode: SessionMode::Graphical,
+                user: SessionUser::Named("alex".into()),
+                desktop_shell: Some(DesktopShell::Noctalia),
+                seat: SeatBackend::Seatd,
+                session_tracker: SessionTracker::Elogind,
+                ..Session::default()
+            },
+            ..SystemManifest::default()
+        };
+        let toml = toml::to_string(&manifest).expect("serialize session");
+        let parsed: SystemManifest = toml::from_str(&toml).expect("deserialize session");
+        assert_eq!(parsed.session, manifest.session);
+    }
+
+    #[test]
+    fn missing_session_defaults_to_text_while_explicit_auto_is_accepted() {
+        let defaulted: SystemManifest = toml::from_str("").expect("default manifest");
+        assert_eq!(defaulted.session.mode, SessionMode::Text);
+
+        let legacy: SystemManifest =
+            toml::from_str("[session]\nmode = \"auto\"\n").expect("explicit legacy auto session");
+        assert_eq!(legacy.session.mode, SessionMode::Auto);
     }
 }

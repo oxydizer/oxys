@@ -3,8 +3,8 @@ use std::sync::mpsc::Sender;
 use crate::exec;
 
 use super::{
-    boot, filesystem, host, login, portage, services, users, SystemInstallError,
-    SystemInstallEvent, SystemInstallPlan, SystemInstallStep, SystemInstallStream,
+    SystemInstallError, SystemInstallEvent, SystemInstallPlan, SystemInstallStep,
+    SystemInstallStream, boot, filesystem, host, login, portage, services, users,
 };
 
 pub fn apply_system_install_plan(plan: &SystemInstallPlan) -> SystemInstallStream {
@@ -49,6 +49,9 @@ fn run_step(
     });
 
     match step {
+        SystemInstallStep::ResolveSession { .. } => {}
+        SystemInstallStep::ResolveGraphics { .. } => {}
+        SystemInstallStep::ResolveKernelCmdline { .. } => {}
         SystemInstallStep::Command { .. } => unreachable!("command steps return above"),
         SystemInstallStep::GenerateFstab {
             disk, target_mount, ..
@@ -73,14 +76,16 @@ fn run_step(
         } => boot::install_boot_assets(target_mount, efi_mount, sender)?,
         SystemInstallStep::GenerateSystemdBoot {
             manifest,
+            resolved_kernel_cmdline,
             target_mount,
             ..
-        } => boot::write_systemd_boot(manifest, target_mount)?,
+        } => boot::write_systemd_boot(manifest, resolved_kernel_cmdline, target_mount)?,
         SystemInstallStep::GenerateGrubConfig {
             manifest,
+            resolved_kernel_cmdline,
             target_mount,
             ..
-        } => boot::write_grub_config(manifest, target_mount)?,
+        } => boot::write_grub_config(manifest, resolved_kernel_cmdline, target_mount)?,
         SystemInstallStep::ActivateSystemdServices {
             manifest,
             target_mount,
@@ -104,12 +109,30 @@ fn run_step(
         } => portage::emerge_manifest_packages(manifest, target_mount, sender)?,
         SystemInstallStep::SetupLogin {
             manifest,
+            resolved,
+            resolved_graphics,
             target_mount,
             ..
-        } => login::setup_login(manifest, target_mount, sender)?,
+        } => login::setup_login(
+            manifest,
+            resolved,
+            resolved_graphics,
+            target_mount,
+            sender,
+        )?,
+        SystemInstallStep::ConfigureGraphicsRuntime {
+            manifest,
+            target_mount,
+            ..
+        } => {
+            crate::runtime::sync_runtime_config(manifest, target_mount)?;
+        }
         SystemInstallStep::GenerateInitramfs {
-            target_mount, kver, ..
-        } => boot::generate_initramfs(target_mount, kver, sender)?,
+            target_mount,
+            kver,
+            drivers,
+            ..
+        } => boot::generate_initramfs(target_mount, kver, drivers, sender)?,
         SystemInstallStep::Finalize {
             manifest,
             target_mount,

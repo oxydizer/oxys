@@ -15,7 +15,7 @@ mod cli;
 use cli::{
     manifest_io::{
         create_plan, effective_portage_config_dir, effective_system_manifest_path, load_manifest,
-        load_manifest_optional, persist_manifest, persist_manifest_value,
+        load_manifest_optional, persist_manifest_value,
     },
     output::{fail_on_conflicts, print_changes, print_plan},
 };
@@ -49,6 +49,12 @@ enum Commands {
     Compile {
         /// Path to a standalone config .rs file (no crate needed)
         file: Option<PathBuf>,
+    },
+    /// Print image-builder environment values derived from a compiled manifest.
+    GraphicsBuildPolicy {
+        /// Generated manifest to resolve.
+        #[arg(default_value = "manifest.toml")]
+        manifest: PathBuf,
     },
     /// Show the Portage plan for the local manifest without touching disk
     Check,
@@ -103,6 +109,7 @@ fn main() -> ExitCode {
 
     let result = match cli.command {
         Commands::Compile { file } => cli::compile::run(file),
+        Commands::GraphicsBuildPolicy { manifest } => cmd_graphics_build_policy(&manifest),
         Commands::Check => cmd_check(),
         Commands::Help => cmd_help(),
         Commands::Diff => cmd_diff(),
@@ -133,6 +140,30 @@ fn main() -> ExitCode {
     }
 }
 
+fn cmd_graphics_build_policy(path: &Path) -> Result<()> {
+    let manifest = load_manifest(path)?;
+    let resolved = manifest.resolved_graphics()?;
+    let video_cards = resolved.mesa_build_values();
+    let drm_drivers = resolved.drm_build_values();
+    if video_cards.is_empty() {
+        return Err(format!(
+            "{} resolves no Mesa VIDEO_CARDS; compile the manifest on the target hardware or select hardware.graphics.mesa.video_cards explicitly",
+            path.display()
+        )
+        .into());
+    }
+    if drm_drivers.is_empty() {
+        return Err(format!(
+            "{} resolves no kernel DRM drivers; select hardware.graphics.drm.drivers explicitly",
+            path.display()
+        )
+        .into());
+    }
+    println!("OXYS_VIDEO_CARDS='{}'", video_cards.join(" "));
+    println!("OXYS_DRM_DRIVERS='{}'", drm_drivers.join(" "));
+    Ok(())
+}
+
 fn cmd_check() -> Result<()> {
     let desired = load_manifest(Path::new(LOCAL_MANIFEST))?;
     let plan = create_plan(&desired)?;
@@ -158,6 +189,9 @@ COMMON COMMANDS
 
     oxys check
         Resolve the local manifest and show the Portage plan without changing the system.
+
+    oxys graphics-build-policy [manifest.toml]
+        Export Mesa and kernel build inputs from resolved graphics policy.
 
     oxys diff
         Compare local manifest.toml with /etc/oxys/current-manifest.toml.
@@ -325,6 +359,23 @@ mod tests {
 
         match cli.command {
             Commands::Help => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn graphics_build_policy_subcommand_parses_manifest_path() {
+        let cli = Cli::try_parse_from([
+            "oxys",
+            "graphics-build-policy",
+            "/tmp/desktop-manifest.toml",
+        ])
+        .expect("graphics build policy command should parse");
+
+        match cli.command {
+            Commands::GraphicsBuildPolicy { manifest } => {
+                assert_eq!(manifest, PathBuf::from("/tmp/desktop-manifest.toml"));
+            }
             other => panic!("unexpected command: {other:?}"),
         }
     }

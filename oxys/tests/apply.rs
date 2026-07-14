@@ -53,6 +53,7 @@ fn apply_reconciles_world_with_manifest() -> Result<(), Box<dyn std::error::Erro
         .env("OXYS_PORTAGE_TREE", fixture.root.path())
         .env("OXYS_PORTAGE_CONFIG_DIR", &portage_config_dir)
         .env("OXYS_CACHE_DIR", workdir.path().join("cache"))
+        .env("OXYS_ROOT", workdir.path().join("root"))
         .output()?;
 
     assert!(

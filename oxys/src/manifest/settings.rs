@@ -1,6 +1,6 @@
 use serde::{
-    de::{self, MapAccess, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, MapAccess, Visitor},
 };
 use std::fmt;
 
@@ -51,6 +51,100 @@ impl Default for DisplayStack {
 pub enum AudioStack {
     Pipewire,
     Pulseaudio,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Session {
+    pub mode: SessionMode,
+    pub user: SessionUser,
+    pub login: LoginFrontend,
+    pub compositor: Compositor,
+    pub desktop_shell: Option<DesktopShell>,
+    pub seat: SeatBackend,
+    pub session_tracker: SessionTracker,
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            mode: SessionMode::Text,
+            user: SessionUser::FirstConfigured,
+            login: LoginFrontend::default(),
+            compositor: Compositor::Niri,
+            desktop_shell: None,
+            seat: SeatBackend::Auto,
+            session_tracker: SessionTracker::Auto,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    Auto,
+    #[default]
+    Text,
+    Graphical,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionUser {
+    #[default]
+    FirstConfigured,
+    Named(String),
+    Index(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginFrontend {
+    Tty { tty: u8 },
+    OxysLogin { tty: u8, fallback_tty_login: bool },
+}
+
+impl Default for LoginFrontend {
+    fn default() -> Self {
+        Self::OxysLogin {
+            tty: 1,
+            fallback_tty_login: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Compositor {
+    #[default]
+    Niri,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopShell {
+    Noctalia,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SeatBackend {
+    #[default]
+    Auto,
+    Seatd,
+    Logind,
+    Direct,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTracker {
+    #[default]
+    Auto,
+    Elogind,
+    Systemd,
+    Pam,
+    None,
 }
 
 impl Default for AudioStack {
@@ -232,6 +326,165 @@ impl<'de> Deserialize<'de> for Gpu {
         }
 
         deserializer.deserialize_any(GpuVisitor)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Graphics {
+    pub mesa: MesaGraphics,
+    pub drm: Drm,
+    pub nvidia: Option<Nvidia>,
+    pub vm_support: VmGraphics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MesaGraphics {
+    pub video_cards: VideoCards,
+    pub software_fallback: SoftwareRenderer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoCards {
+    #[default]
+    Auto,
+    Explicit(Vec<VideoCard>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoCard {
+    Intel,
+    Amdgpu,
+    Radeon,
+    Radeonsi,
+    Nouveau,
+    Virgl,
+    Vmware,
+    Lavapipe,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Drm {
+    pub drivers: DrmDrivers,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrmDrivers {
+    #[default]
+    Auto,
+    Explicit(Vec<DrmDriver>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrmDriver {
+    Intel,
+    Amdgpu,
+    Radeon,
+    Nouveau,
+    VirtioGpu,
+    Vmwgfx,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Nvidia {
+    pub driver: NvidiaDriver,
+    pub modeset: bool,
+    pub prime: PrimeMode,
+}
+
+impl Default for Nvidia {
+    fn default() -> Self {
+        Self {
+            driver: NvidiaDriver::Proprietary,
+            modeset: true,
+            prime: PrimeMode::Disabled,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NvidiaDriver {
+    #[default]
+    Proprietary,
+    Nouveau,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrimeMode {
+    #[default]
+    Disabled,
+    Primary,
+    Offload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VmGraphics {
+    #[default]
+    None,
+    Virgl,
+    Vmware,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoftwareRenderer {
+    #[default]
+    Disabled,
+    Allowed,
+    Required,
+}
+
+impl From<Gpu> for Graphics {
+    fn from(gpu: Gpu) -> Self {
+        let video_cards = match &gpu {
+            Gpu::Auto => VideoCards::Auto,
+            Gpu::Single(GpuVendor::Intel) => VideoCards::Explicit(vec![VideoCard::Intel]),
+            Gpu::Single(GpuVendor::Amd) => {
+                VideoCards::Explicit(vec![VideoCard::Amdgpu, VideoCard::Radeonsi])
+            }
+            Gpu::Single(GpuVendor::Nvidia) => VideoCards::Auto,
+            Gpu::Hybrid {
+                igpu: GpuVendor::Intel,
+                ..
+            } => VideoCards::Explicit(vec![VideoCard::Intel]),
+            Gpu::Hybrid {
+                igpu: GpuVendor::Amd,
+                ..
+            } => VideoCards::Explicit(vec![VideoCard::Amdgpu, VideoCard::Radeonsi]),
+            Gpu::Hybrid { .. } => VideoCards::Auto,
+        };
+        let nvidia = match gpu {
+            Gpu::Single(GpuVendor::Nvidia) => Some(Nvidia {
+                prime: PrimeMode::Primary,
+                ..Nvidia::default()
+            }),
+            Gpu::Hybrid {
+                igpu: _,
+                dgpu: GpuVendor::Nvidia,
+            } => Some(Nvidia {
+                prime: PrimeMode::Offload,
+                ..Nvidia::default()
+            }),
+            _ => None,
+        };
+        Self {
+            mesa: MesaGraphics {
+                video_cards,
+                ..MesaGraphics::default()
+            },
+            nvidia,
+            ..Self::default()
+        }
     }
 }
 

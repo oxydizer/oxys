@@ -202,6 +202,167 @@ SCAFFOLD
 	fi
 fi
 
+# --- 6. Record the graphics capabilities of the finished image -------------
+# This is generated from installed VDB metadata, real driver artifacts, and
+# the injected kernel config. The installer consumes this contract before it
+# mutates a target. Older images without it can still be inspected directly.
+CAPABILITY_DIR=/usr/share/oxys
+CAPABILITY_FILE=${CAPABILITY_DIR}/image-capabilities.toml
+mkdir -p "${CAPABILITY_DIR}"
+
+toml_array() {
+	local -n values=$1
+	local separator="" value
+	printf '['
+	for value in "${values[@]}"; do
+		printf '%s"%s"' "${separator}" "${value}"
+		separator=', '
+	done
+	printf ']'
+}
+
+find_graphics_artifact() {
+	local name root found
+	for name in "$@"; do
+		for root in /usr/lib64 /usr/lib; do
+			# Match regular files AND symlinks: since Mesa 25/26 every per-driver
+			# *_dri.so is a symlink into the single "dril" megadriver
+			# (libdril_dri.so), so a bare `-type f` finds none of them.
+			found="$(find "${root}" \( -type f -o -type l \) -name "${name}" -print -quit 2>/dev/null || true)"
+			if [[ -n "${found}" ]]; then
+				printf '%s\n' "${found#/}"
+				return 0
+			fi
+		done
+	done
+	return 1
+}
+
+mesa_vdb="$({ find /var/db/pkg/media-libs -mindepth 1 -maxdepth 1 -type d -name 'mesa-*' -print 2>/dev/null || true; } | sort -V | tail -n 1)"
+mesa_version="${mesa_vdb##*/mesa-}"
+mesa_cards=()
+mesa_artifacts=()
+
+# The installed DRI driver artifact is ground truth: it exists only if that
+# gallium driver was actually built into this Mesa. Do NOT additionally gate on
+# the VDB USE flag -- some policy cards have no matching Mesa USE flag at all
+# (e.g. `amdgpu`, whose Mesa driver IS radeonsi), so a USE gate would wrongly
+# reject a capability that is genuinely present on disk.
+record_mesa_capability() {
+	local flag=$1
+	shift
+	local artifact
+	if artifact="$(find_graphics_artifact "$@")"; then
+		mesa_cards+=("${flag}")
+		mesa_artifacts+=("${artifact}")
+	fi
+}
+
+record_mesa_capability video_cards_intel iris_dri.so crocus_dri.so
+record_mesa_capability video_cards_amdgpu radeonsi_dri.so
+record_mesa_capability video_cards_radeonsi radeonsi_dri.so
+record_mesa_capability video_cards_radeon r600_dri.so radeon_dri.so
+record_mesa_capability video_cards_nouveau nouveau_dri.so
+record_mesa_capability video_cards_virgl virtio_gpu_dri.so
+record_mesa_capability video_cards_vmware vmwgfx_dri.so
+record_mesa_capability video_cards_lavapipe libvulkan_lvp.so libvulkan_lvp.so.1
+
+# A different-policy binpackage must never silently define the finished image.
+# The catalyst config excludes Mesa binpackages, and this independent check
+# proves both the requested USE_EXPAND flags and their runtime artifacts made
+# it into the actual filesystem.
+#
+# The source of truth is the build policy that build.sh stages into the image
+# (see oxys-iso/build.sh), NOT `portageq envvar VIDEO_CARDS`: our VIDEO_CARDS
+# policy lives only in the build-time portage_confdir, which catalyst discards,
+# so inside this finished chroot portageq returns the seed stage3's PROFILE
+# DEFAULT (amdgpu fbdev intel nouveau radeon radeonsi vesa dummy) -- cards Mesa
+# was deliberately not built for -- and the check would false-FATAL on them.
+GRAPHICS_POLICY_FILE=/usr/share/oxys/graphics-build-policy.env
+if [[ ! -f "${GRAPHICS_POLICY_FILE}" ]]; then
+	echo "fsscript: FATAL: ${GRAPHICS_POLICY_FILE} is missing." >&2
+	echo "  build.sh must stage the graphics build policy into the root overlay." >&2
+	exit 1
+fi
+# shellcheck source=/dev/null
+requested_video_cards="$(. "${GRAPHICS_POLICY_FILE}" && printf '%s' "${VIDEO_CARDS}")"
+missing_mesa=()
+for card in ${requested_video_cards}; do
+	flag="video_cards_${card}"
+	if [[ " ${mesa_cards[*]} " != *" ${flag} "* ]]; then
+		missing_mesa+=("${flag}")
+	fi
+done
+if (( ${#missing_mesa[@]} > 0 )); then
+	echo "fsscript: FATAL: built Mesa does not satisfy VIDEO_CARDS: ${missing_mesa[*]}" >&2
+	echo "  Cached/incompatible Mesa packages must be rejected and rebuilt from source." >&2
+	exit 1
+fi
+
+kernel_config="$({ find /boot -maxdepth 1 -type f -name 'config-*' -print 2>/dev/null || true; } | sort -V | tail -n 1)"
+kernel_release="${kernel_config##*/config-}"
+kernel_enabled=()
+drm_drivers=()
+if [[ -f "${kernel_config}" ]]; then
+	mapfile -t kernel_enabled < <(awk -F= '$1 ~ /^CONFIG_/ && $2 ~ /^(y|m)$/ { print $1 }' "${kernel_config}" | sort)
+	declare -A drm_options=(
+		[intel]=CONFIG_DRM_I915
+		[amdgpu]=CONFIG_DRM_AMDGPU
+		[radeon]=CONFIG_DRM_RADEON
+		[nouveau]=CONFIG_DRM_NOUVEAU
+		[virtio_gpu]=CONFIG_DRM_VIRTIO_GPU
+		[vmwgfx]=CONFIG_DRM_VMWGFX
+	)
+	for driver in intel amdgpu radeon nouveau virtio_gpu vmwgfx; do
+		if grep -qE "^${drm_options[${driver}]}=[ym]$" "${kernel_config}"; then
+			drm_drivers+=("${driver}")
+		fi
+	done
+fi
+
+build_id="unknown"
+if [[ -f /usr/src/oxysos/build-metadata.env ]]; then
+	build_id="$(awk -F= '$1 == "build_id" { sub(/^[^=]*=/, ""); print; exit }' /usr/src/oxysos/build-metadata.env)"
+fi
+nvidia_vdb="$({ find /var/db/pkg/x11-drivers -mindepth 1 -maxdepth 1 -type d -name 'nvidia-drivers-*' -print 2>/dev/null || true; } | sort -V | tail -n 1)"
+nvidia_version="${nvidia_vdb##*/nvidia-drivers-}"
+nvidia_proprietary=false
+nvidia_kernel_abi=""
+if [[ -n "${nvidia_vdb}" ]]; then
+	nvidia_proprietary=true
+	if find "/lib/modules/${kernel_release}" -type f \( -name 'nvidia_drm.ko' -o -name 'nvidia_drm.ko.*' \) -print -quit 2>/dev/null | grep -q .; then
+		nvidia_kernel_abi="${kernel_release}"
+	fi
+fi
+
+{
+	printf 'format_version = 1\n'
+	printf 'build_id = "%s"\n' "${build_id:-unknown}"
+	printf 'created_utc = "%s"\n\n' "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+	printf '[graphics.mesa]\nversion = "%s"\nvideo_cards = ' "${mesa_version}"
+	toml_array mesa_cards
+	printf '\nartifacts = '
+	toml_array mesa_artifacts
+	printf '\n\n[graphics.kernel]\nrelease = "%s"\nconfig_path = "%s"\ndrm_drivers = ' "${kernel_release}" "${kernel_config#/}"
+	toml_array drm_drivers
+	printf '\nenabled = '
+	toml_array kernel_enabled
+	printf '\n\n[graphics.nvidia]\nproprietary = %s\n' "${nvidia_proprietary}"
+	[[ -n "${nvidia_version}" ]] && printf 'driver_version = "%s"\n' "${nvidia_version}"
+	[[ -n "${nvidia_kernel_abi}" ]] && printf 'kernel_abi = "%s"\n' "${nvidia_kernel_abi}"
+	printf '\n[graphics.vm]\nvirgl = %s\nvmware = %s\n' \
+		"$([[ " ${mesa_cards[*]} " == *' video_cards_virgl '* ]] && printf true || printf false)" \
+		"$([[ " ${mesa_cards[*]} " == *' video_cards_vmware '* ]] && printf true || printf false)"
+	if [[ " ${mesa_cards[*]} " == *' video_cards_virgl '* ]]; then
+		printf 'virgl_launch_device = "virtio-vga-gl"\n'
+	fi
+	if [[ " ${mesa_cards[*]} " == *' video_cards_vmware '* ]]; then
+		printf 'vmware_launch_device = "vmware-svga"\n'
+	fi
+} > "${CAPABILITY_FILE}"
+sha256sum "${CAPABILITY_FILE}" > "${CAPABILITY_FILE}.sha256"
+echo "OxysOS fsscript: wrote checksummed image graphics capability contract."
+
 # NOTE: the GURU + oxys overlays are shipped via the ISO root overlay (rsynced
 # into /var/db/repos by catalyst), not cloned here -- see
 # scripts/build-installer-overlay.sh (GURU checkout) and overlay/var/db/repos/.

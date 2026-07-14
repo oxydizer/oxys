@@ -6,15 +6,23 @@ use std::{
 
 use thiserror::Error;
 
-use crate::manifest::{Gpu, GpuVendor, SystemManifest};
-const PRIME_ENV_PATH: &str = "etc/environment.d/90-oxys-prime-offload.conf";
-const PRIME_PROFILE_PATH: &str = "etc/profile.d/oxys-prime-offload.sh";
+use crate::manifest::{
+    Graphics, NvidiaDriver, PrimeMode as GraphicsPrimeMode, SystemManifest, VideoCard, VideoCards,
+};
+const PRIME_ENV_PATH: &str = "etc/environment.d/90-oxys-nvidia-primary.conf";
+const PRIME_PROFILE_PATH: &str = "etc/profile.d/oxys-nvidia-primary.sh";
+const LEGACY_PRIME_ENV_PATH: &str = "etc/environment.d/90-oxys-prime-offload.conf";
+const LEGACY_PRIME_PROFILE_PATH: &str = "etc/profile.d/oxys-prime-offload.sh";
 const PRIME_MODPROBE_PATH: &str = "etc/modprobe.d/oxys-nvidia-prime.conf";
+const NVIDIA_BLACKLIST_PATH: &str = "etc/modprobe.d/oxys-nvidia-stack.conf";
 const PRIME_RUN_PATH: &str = "usr/local/bin/prime-run";
+const GRAPHICS_DIAGNOSTICS_PATH: &str = "usr/local/bin/oxys-graphics-diagnostics";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfigOutcome {
     pub prime_offload_configured: bool,
+    pub prime_primary_configured: bool,
+    pub graphics_diagnostics_configured: bool,
 }
 
 #[derive(Debug, Error)]
@@ -49,50 +57,74 @@ pub fn sync_runtime_config(
     manifest: &SystemManifest,
     root: &Path,
 ) -> Result<RuntimeConfigOutcome, RuntimeConfigError> {
-    let mode = prime_mode(&manifest.hardware.gpu);
+    let mode = prime_mode(&manifest.hardware.graphics);
+    let proprietary_modeset = manifest
+        .hardware
+        .graphics
+        .nvidia
+        .is_some_and(|nvidia| nvidia.driver == NvidiaDriver::Proprietary && nvidia.modeset);
     let files = [
         GeneratedFile {
             path: root.join(PRIME_ENV_PATH),
-            contents: mode.map(render_prime_environment),
+            contents: (mode == Some(PrimeMode::Primary)).then_some(render_prime_environment()),
             mode: 0o644,
         },
         GeneratedFile {
             path: root.join(PRIME_PROFILE_PATH),
-            contents: mode.map(render_prime_profile),
+            contents: (mode == Some(PrimeMode::Primary)).then_some(render_prime_profile()),
             mode: 0o644,
         },
         GeneratedFile {
             path: root.join(PRIME_MODPROBE_PATH),
-            contents: mode.map(render_prime_modprobe),
+            contents: proprietary_modeset.then_some(render_prime_modprobe()),
             mode: 0o644,
         },
         GeneratedFile {
             path: root.join(PRIME_RUN_PATH),
-            contents: mode.map(render_prime_run),
+            contents: mode.and_then(|mode| match mode {
+                PrimeMode::OffloadIntel | PrimeMode::OffloadAmd => Some(render_prime_run(mode)),
+                PrimeMode::Primary => None,
+            }),
+            mode: 0o755,
+        },
+        GeneratedFile {
+            path: root.join(NVIDIA_BLACKLIST_PATH),
+            contents: render_nvidia_blacklist(&manifest.hardware.graphics),
+            mode: 0o644,
+        },
+        GeneratedFile {
+            path: root.join(GRAPHICS_DIAGNOSTICS_PATH),
+            contents: Some(GRAPHICS_DIAGNOSTICS),
             mode: 0o755,
         },
     ];
 
-    let mut configured = false;
     for file in files {
         match file.contents {
             Some(contents) => {
-                configured = true;
                 write_generated_file(&file.path, contents, file.mode)?;
             }
             None => remove_if_exists(&file.path)?,
         }
     }
+    remove_if_exists(&root.join(LEGACY_PRIME_ENV_PATH))?;
+    remove_if_exists(&root.join(LEGACY_PRIME_PROFILE_PATH))?;
 
     Ok(RuntimeConfigOutcome {
-        prime_offload_configured: configured,
+        prime_offload_configured: matches!(
+            mode,
+            Some(PrimeMode::OffloadIntel | PrimeMode::OffloadAmd)
+        ),
+        prime_primary_configured: mode == Some(PrimeMode::Primary),
+        graphics_diagnostics_configured: true,
     })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrimeMode {
-    IntelNvidia,
-    AmdNvidia,
+    Primary,
+    OffloadIntel,
+    OffloadAmd,
 }
 
 struct GeneratedFile {
@@ -101,86 +133,62 @@ struct GeneratedFile {
     mode: u32,
 }
 
-fn prime_mode(gpu: &Gpu) -> Option<PrimeMode> {
-    match gpu {
-        Gpu::Hybrid {
-            igpu: GpuVendor::Intel,
-            dgpu: GpuVendor::Nvidia,
-        } => Some(PrimeMode::IntelNvidia),
-        Gpu::Hybrid {
-            igpu: GpuVendor::Amd,
-            dgpu: GpuVendor::Nvidia,
-        } => Some(PrimeMode::AmdNvidia),
+fn prime_mode(graphics: &Graphics) -> Option<PrimeMode> {
+    let nvidia = graphics.nvidia?;
+    if nvidia.driver != NvidiaDriver::Proprietary {
+        return None;
+    }
+    if nvidia.prime == GraphicsPrimeMode::Primary {
+        return Some(PrimeMode::Primary);
+    }
+    if nvidia.prime != GraphicsPrimeMode::Offload {
+        return None;
+    }
+    match &graphics.mesa.video_cards {
+        VideoCards::Explicit(cards) if cards.contains(&VideoCard::Intel) => {
+            Some(PrimeMode::OffloadIntel)
+        }
+        VideoCards::Explicit(cards) if cards.contains(&VideoCard::Amdgpu) => {
+            Some(PrimeMode::OffloadAmd)
+        }
         _ => None,
     }
 }
 
-fn render_prime_environment(mode: PrimeMode) -> &'static str {
-    match mode {
-        PrimeMode::IntelNvidia => concat!(
-            "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
-            "# Update your OXYS config and rerun `oxys apply` to regenerate this file\n",
-            "# Intel iGPU + NVIDIA dGPU PRIME render offload defaults\n",
-            "__NV_PRIME_RENDER_OFFLOAD=1\n",
-            "__GLX_VENDOR_LIBRARY_NAME=nvidia\n",
-            "__VK_LAYER_NV_optimus=NVIDIA_only\n",
-            "LIBVA_DRIVER_NAME=nvidia\n"
-        ),
-        PrimeMode::AmdNvidia => concat!(
-            "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
-            "# Update your OXYS config and rerun `oxys apply` to regenerate this file\n",
-            "# AMD iGPU + NVIDIA dGPU PRIME render offload defaults\n",
-            "__NV_PRIME_RENDER_OFFLOAD=1\n",
-            "__GLX_VENDOR_LIBRARY_NAME=nvidia\n",
-            "__VK_LAYER_NV_optimus=NVIDIA_only\n",
-            "LIBVA_DRIVER_NAME=nvidia\n"
-        ),
-    }
+fn render_prime_environment() -> &'static str {
+    concat!(
+        "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
+        "# NVIDIA owns the primary rendering path\n",
+        "__NV_PRIME_RENDER_OFFLOAD=1\n",
+        "__GLX_VENDOR_LIBRARY_NAME=nvidia\n",
+        "__VK_LAYER_NV_optimus=NVIDIA_only\n",
+        "LIBVA_DRIVER_NAME=nvidia\n"
+    )
 }
 
-fn render_prime_profile(mode: PrimeMode) -> &'static str {
-    match mode {
-        PrimeMode::IntelNvidia => concat!(
-            "#!/bin/sh\n",
-            "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
-            "# Intel iGPU + NVIDIA dGPU PRIME render offload defaults\n",
-            "export __NV_PRIME_RENDER_OFFLOAD=1\n",
-            "export __GLX_VENDOR_LIBRARY_NAME=nvidia\n",
-            "export __VK_LAYER_NV_optimus=NVIDIA_only\n",
-            "export LIBVA_DRIVER_NAME=nvidia\n"
-        ),
-        PrimeMode::AmdNvidia => concat!(
-            "#!/bin/sh\n",
-            "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
-            "# AMD iGPU + NVIDIA dGPU PRIME render offload defaults\n",
-            "export __NV_PRIME_RENDER_OFFLOAD=1\n",
-            "export __GLX_VENDOR_LIBRARY_NAME=nvidia\n",
-            "export __VK_LAYER_NV_optimus=NVIDIA_only\n",
-            "export LIBVA_DRIVER_NAME=nvidia\n"
-        ),
-    }
+fn render_prime_profile() -> &'static str {
+    concat!(
+        "#!/bin/sh\n",
+        "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
+        "# NVIDIA owns the primary rendering path\n",
+        "export __NV_PRIME_RENDER_OFFLOAD=1\n",
+        "export __GLX_VENDOR_LIBRARY_NAME=nvidia\n",
+        "export __VK_LAYER_NV_optimus=NVIDIA_only\n",
+        "export LIBVA_DRIVER_NAME=nvidia\n"
+    )
 }
 
-fn render_prime_modprobe(mode: PrimeMode) -> &'static str {
-    match mode {
-        PrimeMode::IntelNvidia => concat!(
-            "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
-            "# Update your OXYS config and rerun `oxys apply` to regenerate this file\n",
-            "# Intel iGPU + NVIDIA dGPU PRIME requires DRM KMS on the NVIDIA stack\n",
-            "options nvidia-drm modeset=1\n"
-        ),
-        PrimeMode::AmdNvidia => concat!(
-            "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
-            "# Update your OXYS config and rerun `oxys apply` to regenerate this file\n",
-            "# AMD iGPU + NVIDIA dGPU PRIME requires DRM KMS on the NVIDIA stack\n",
-            "options nvidia-drm modeset=1\n"
-        ),
-    }
+fn render_prime_modprobe() -> &'static str {
+    concat!(
+        "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
+        "# Proprietary NVIDIA DRM KMS policy\n",
+        "options nvidia-drm modeset=1\n"
+    )
 }
 
 fn render_prime_run(mode: PrimeMode) -> &'static str {
     match mode {
-        PrimeMode::IntelNvidia => concat!(
+        PrimeMode::OffloadIntel => concat!(
             "#!/bin/sh\n",
             "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
             "# Intel iGPU + NVIDIA dGPU PRIME wrapper\n",
@@ -190,7 +198,7 @@ fn render_prime_run(mode: PrimeMode) -> &'static str {
             "export LIBVA_DRIVER_NAME=nvidia\n",
             "exec \"$@\"\n"
         ),
-        PrimeMode::AmdNvidia => concat!(
+        PrimeMode::OffloadAmd => concat!(
             "#!/bin/sh\n",
             "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
             "# AMD iGPU + NVIDIA dGPU PRIME wrapper\n",
@@ -200,8 +208,42 @@ fn render_prime_run(mode: PrimeMode) -> &'static str {
             "export LIBVA_DRIVER_NAME=nvidia\n",
             "exec \"$@\"\n"
         ),
+        PrimeMode::Primary => unreachable!("primary mode does not generate prime-run"),
     }
 }
+
+fn render_nvidia_blacklist(graphics: &Graphics) -> Option<&'static str> {
+    match graphics.nvidia?.driver {
+        NvidiaDriver::Proprietary => Some(concat!(
+            "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
+            "blacklist nouveau\n",
+            "options nouveau modeset=0\n"
+        )),
+        NvidiaDriver::Nouveau => Some(concat!(
+            "# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY\n",
+            "blacklist nvidia\n",
+            "blacklist nvidia_drm\n",
+            "blacklist nvidia_modeset\n",
+            "blacklist nvidia_uvm\n"
+        )),
+    }
+}
+
+const GRAPHICS_DIAGNOSTICS: &str = r#"#!/bin/sh
+# THIS FILE IS AUTO-GENERATED BY OXYS - DO NOT EDIT MANUALLY
+echo "LIBSEAT_BACKEND=${LIBSEAT_BACKEND:-auto}"
+echo "DRM nodes:"
+ls -l /dev/dri/card* /dev/dri/renderD* 2>/dev/null || echo "  none"
+echo "DRM modules:"
+lsmod 2>/dev/null | grep -E '^(i915|xe|amdgpu|radeon|nouveau|virtio_gpu|vmwgfx|nvidia)' || echo "  none detected"
+if command -v glxinfo >/dev/null 2>&1; then
+    glxinfo -B 2>/dev/null | grep -E 'OpenGL vendor|OpenGL renderer' || true
+elif command -v vulkaninfo >/dev/null 2>&1; then
+    vulkaninfo --summary 2>/dev/null | sed -n '/Devices:/,$p'
+else
+    echo "Mesa renderer: install glxinfo or vulkaninfo for userspace diagnostics"
+fi
+"#;
 
 fn write_generated_file(path: &Path, contents: &str, mode: u32) -> Result<(), RuntimeConfigError> {
     if let Some(parent) = path.parent() {
@@ -238,17 +280,19 @@ fn remove_if_exists(path: &Path) -> Result<(), RuntimeConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::manifest::GpuVendor;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
-    fn writes_prime_files_for_amd_nvidia_hybrid() -> Result<(), Box<dyn std::error::Error>> {
+    fn offload_writes_only_launcher_and_modeset_not_global_environment(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let root = test_root("amd_nvidia_prime");
         let manifest = SystemManifest {
             hardware: crate::manifest::Hardware {
-                gpu: Gpu::Hybrid {
+                graphics: Graphics::from(crate::manifest::Gpu::Hybrid {
                     igpu: GpuVendor::Amd,
                     dgpu: GpuVendor::Nvidia,
-                },
+                }),
                 ..crate::manifest::Hardware::default()
             },
             ..SystemManifest::default()
@@ -257,9 +301,44 @@ mod tests {
         let outcome = sync_runtime_config(&manifest, &root)?;
 
         assert!(outcome.prime_offload_configured);
-        assert!(fs::read_to_string(root.join(PRIME_ENV_PATH))?.contains("AMD iGPU + NVIDIA dGPU"));
+        assert!(!outcome.prime_primary_configured);
+        assert!(!root.join(PRIME_ENV_PATH).exists());
+        assert!(!root.join(PRIME_PROFILE_PATH).exists());
         assert!(fs::read_to_string(root.join(PRIME_MODPROBE_PATH))?.contains("modeset=1"));
-        assert!(fs::read_to_string(root.join(PRIME_RUN_PATH))?.contains("exec \"$@\""));
+        let launcher = fs::read_to_string(root.join(PRIME_RUN_PATH))?;
+        assert!(launcher.contains("__NV_PRIME_RENDER_OFFLOAD=1"));
+        assert!(launcher.contains("exec \"$@\""));
+        assert!(root.join(GRAPHICS_DIAGNOSTICS_PATH).exists());
+
+        cleanup(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn primary_writes_global_environment_without_offload_launcher(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_root("nvidia_primary");
+        let manifest = SystemManifest {
+            hardware: crate::manifest::Hardware {
+                graphics: Graphics {
+                    nvidia: Some(crate::manifest::Nvidia {
+                        prime: GraphicsPrimeMode::Primary,
+                        ..crate::manifest::Nvidia::default()
+                    }),
+                    ..Graphics::default()
+                },
+                ..crate::manifest::Hardware::default()
+            },
+            ..SystemManifest::default()
+        };
+
+        let outcome = sync_runtime_config(&manifest, &root)?;
+
+        assert!(outcome.prime_primary_configured);
+        assert!(!outcome.prime_offload_configured);
+        assert!(fs::read_to_string(root.join(PRIME_ENV_PATH))?
+            .contains("__NV_PRIME_RENDER_OFFLOAD=1"));
+        assert!(!root.join(PRIME_RUN_PATH).exists());
 
         cleanup(&root)?;
         Ok(())
@@ -271,17 +350,17 @@ mod tests {
         let root = test_root("prime_cleanup");
         let hybrid = SystemManifest {
             hardware: crate::manifest::Hardware {
-                gpu: Gpu::Hybrid {
+                graphics: Graphics::from(crate::manifest::Gpu::Hybrid {
                     igpu: GpuVendor::Intel,
                     dgpu: GpuVendor::Nvidia,
-                },
+                }),
                 ..crate::manifest::Hardware::default()
             },
             ..SystemManifest::default()
         };
         let single = SystemManifest {
             hardware: crate::manifest::Hardware {
-                gpu: Gpu::Single(GpuVendor::Intel),
+                graphics: Graphics::from(crate::manifest::Gpu::Single(GpuVendor::Intel)),
                 ..crate::manifest::Hardware::default()
             },
             ..SystemManifest::default()
@@ -305,10 +384,10 @@ mod tests {
         let root = test_root("intel_amd_hybrid");
         let manifest = SystemManifest {
             hardware: crate::manifest::Hardware {
-                gpu: Gpu::Hybrid {
+                graphics: Graphics::from(crate::manifest::Gpu::Hybrid {
                     igpu: GpuVendor::Intel,
                     dgpu: GpuVendor::Amd,
-                },
+                }),
                 ..crate::manifest::Hardware::default()
             },
             ..SystemManifest::default()

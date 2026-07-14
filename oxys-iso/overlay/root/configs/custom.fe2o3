@@ -10,7 +10,7 @@ pub fn config() -> Oxys {
             libc: Libc::Glibc,
         },
         hardware: Hardware {
-            gpu: detect_gpu(),
+            graphics: detect_graphics(),
             power: match (is_laptop(), is_vendor("asus")) {
                 (true, true) => Power::AsusCtl,
                 (true, false) => Power::Tlp,
@@ -18,6 +18,12 @@ pub fn config() -> Oxys {
             },
         },
         init_system: InitSystem::Openrc,
+        // This template has no configured session user. Keep its current text
+        // login behaviour explicit even though it includes desktop packages.
+        session: Session {
+            mode: SessionMode::Text,
+            ..Default::default()
+        },
         prefer_binary: true,
         packages: vec![
             Package::new("gui-wm/niri").use_flags(vec!["screencast"]),

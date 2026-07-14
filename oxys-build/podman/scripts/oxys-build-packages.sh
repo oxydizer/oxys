@@ -53,6 +53,18 @@ readonly KERNEL_MASK_FILE="/etc/portage/package.mask/no-kernel"
 readonly OXYS_APPLY_BORE="${OXYS_APPLY_BORE:-0}"
 readonly OXYS_BORE_PATCH_URL="${OXYS_BORE_PATCH_URL:-}"
 
+# Graphics is an image-build input, not merely an installer-time wish. These
+# defaults preserve the capability set Oxys shipped before the policy became
+# configurable; callers can narrow or extend it for a particular image.
+VIDEO_CARDS_POLICY="${OXYS_VIDEO_CARDS:-intel radeon radeonsi amdgpu virgl}"
+case "${ARCH_NAME}" in
+  alderlake) DEFAULT_DRM_DRIVERS="intel virtio_gpu" ;;
+  v3) DEFAULT_DRM_DRIVERS="intel amdgpu virtio_gpu" ;;
+  znver3|znver4|znver5) DEFAULT_DRM_DRIVERS="amdgpu virtio_gpu" ;;
+  *) DEFAULT_DRM_DRIVERS="virtio_gpu" ;;
+esac
+DRM_DRIVERS_POLICY="${OXYS_DRM_DRIVERS:-${DEFAULT_DRM_DRIVERS}}"
+
 build_jobs() {
   nproc --ignore=1
 }
@@ -104,6 +116,43 @@ log() {
   local ts
   ts="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   printf '[%s] %s\n' "${ts}" "$*" | tee -a "${CONTAINER_LOG}"
+}
+
+normalize_graphics_policy() {
+  local kind="$1" raw="$2"
+  shift 2
+  local -a allowed=("$@") values=()
+  local value candidate known duplicate
+
+  raw="${raw//,/ }"
+  for value in ${raw}; do
+    known=0
+    for candidate in "${allowed[@]}"; do
+      [[ "${value}" == "${candidate}" ]] && known=1
+    done
+    if (( known == 0 )); then
+      log "Unsupported ${kind} value '${value}' (allowed: ${allowed[*]})"
+      exit 1
+    fi
+    duplicate=0
+    for candidate in "${values[@]}"; do
+      [[ "${value}" == "${candidate}" ]] && duplicate=1
+    done
+    (( duplicate == 0 )) && values+=("${value}")
+  done
+  if (( ${#values[@]} == 0 )); then
+    log "${kind} policy must contain at least one value"
+    exit 1
+  fi
+  printf '%s\n' "${values[*]}"
+}
+
+resolve_graphics_policy() {
+  VIDEO_CARDS_POLICY="$(normalize_graphics_policy VIDEO_CARDS "${VIDEO_CARDS_POLICY}" \
+    intel amdgpu radeon radeonsi nouveau virgl vmware lavapipe)"
+  DRM_DRIVERS_POLICY="$(normalize_graphics_policy DRM-driver "${DRM_DRIVERS_POLICY}" \
+    intel amdgpu radeon nouveau virtio_gpu vmwgfx)"
+  log "Graphics build policy: VIDEO_CARDS='${VIDEO_CARDS_POLICY}', DRM drivers='${DRM_DRIVERS_POLICY}'"
 }
 
 sanitize_build_id() {
@@ -190,8 +239,8 @@ EMERGE_DEFAULT_OPTS="--ask=n --verbose --keep-going=y --with-bdeps=y --jobs=1 --
 PKGDIR="/var/cache/binpkgs"
 PORTAGE_BINHOST_HEADER_URI=""
 ${binhost_line}
-# Keep QEMU's virtio/virgl renderer in the reusable desktop package set.
-VIDEO_CARDS="intel radeon radeonsi amdgpu virgl"
+# Resolved image policy. Mesa's VDB USE metadata is verified after its merge.
+VIDEO_CARDS="${VIDEO_CARDS_POLICY}"
 INPUT_DEVICES="libinput"
 LLVM_TARGETS="X86 AMDGPU"
 KERNEL="manual"
@@ -445,6 +494,8 @@ write_archive_metadata() {
     printf 'atom=%s\n' "${atom#=}"
     printf 'version=%s\n' "${version}"
     printf 'kernel_release=%s\n' "${kernel_release}"
+    printf 'video_cards=%s\n' "${VIDEO_CARDS_POLICY}"
+    printf 'drm_drivers=%s\n' "${DRM_DRIVERS_POLICY}"
     printf 'archive=%s\n' "$(basename "${archive_path}")"
     printf 'created_utc=%s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
   } > "${metadata_path}"
@@ -491,6 +542,35 @@ merge_kernel_config() {
   fi
 
   cat "${KERNEL_BASE_CONFIG_FILE}" "${KERNEL_ARCH_FRAGMENT_FILE}" > "${source_dir}/.config"
+
+  # The generated fragment is last so explicit image policy wins over the
+  # architecture baseline. olddefconfig resolves dependencies; the assertion
+  # below catches any requested symbol that Kconfig could not retain.
+  local driver option
+  for driver in intel amdgpu radeon nouveau virtio_gpu vmwgfx; do
+    case "${driver}" in
+      intel) option=DRM_I915 ;;
+      amdgpu) option=DRM_AMDGPU ;;
+      radeon) option=DRM_RADEON ;;
+      nouveau) option=DRM_NOUVEAU ;;
+      virtio_gpu) option=DRM_VIRTIO_GPU ;;
+      vmwgfx) option=DRM_VMWGFX ;;
+    esac
+    if [[ " ${DRM_DRIVERS_POLICY} " == *" ${driver} "* ]]; then
+      printf 'CONFIG_%s=y\n' "${option}" >> "${source_dir}/.config"
+    else
+      printf 'CONFIG_%s=n\n' "${option}" >> "${source_dir}/.config"
+    fi
+  done
+  if [[ " ${DRM_DRIVERS_POLICY} " == *' virtio_gpu '* ]]; then
+    cat >> "${source_dir}/.config" <<'EOF_GRAPHICS'
+CONFIG_DRM=y
+CONFIG_DRM_KMS_HELPER=y
+CONFIG_DRM_GEM_SHMEM_HELPER=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_PCI=y
+EOF_GRAPHICS
+  fi
 }
 
 # olddefconfig silently drops any requested symbol whose dependencies aren't
@@ -505,6 +585,7 @@ assert_boot_critical_kernel_config() {
   for opt in OVERLAY_FS SQUASHFS BLK_DEV_LOOP ISO9660_FS BLK_DEV_DM \
              SCSI BLK_DEV_SD BLK_DEV_SR SATA_AHCI BLK_DEV_NVME USB_STORAGE \
              VFAT_FS EFI EFI_STUB INPUT_EVDEV VIRTIO_INPUT \
+             PACKET \
              VIRTIO_NET E1000E IGB IGC R8169 TIGON3 BNX2 ALX \
              USB_USBNET USB_NET_CDCETHER USB_RTL8152 \
              SERIAL_8250 SERIAL_8250_CONSOLE NET_9P NET_9P_VIRTIO 9P_FS; do
@@ -513,6 +594,32 @@ assert_boot_critical_kernel_config() {
   if (( ${#missing[@]} > 0 )); then
     log "Required boot/live-hardware kernel options missing after olddefconfig: ${missing[*]}"
     log "Check kernel/base.config (and its Kconfig dependencies) against this kernel version."
+    exit 1
+  fi
+}
+
+assert_graphics_kernel_config() {
+  local config="/usr/src/linux/.config"
+  local driver option
+  local -a missing=()
+  for driver in ${DRM_DRIVERS_POLICY}; do
+    case "${driver}" in
+      intel) option=DRM_I915 ;;
+      amdgpu) option=DRM_AMDGPU ;;
+      radeon) option=DRM_RADEON ;;
+      nouveau) option=DRM_NOUVEAU ;;
+      virtio_gpu) option=DRM_VIRTIO_GPU ;;
+      vmwgfx) option=DRM_VMWGFX ;;
+    esac
+    grep -qE "^CONFIG_${option}=[ym]$" "${config}" || missing+=("CONFIG_${option}")
+  done
+  if [[ " ${DRM_DRIVERS_POLICY} " == *' virtio_gpu '* ]]; then
+    for option in DRM DRM_KMS_HELPER DRM_GEM_SHMEM_HELPER VIRTIO VIRTIO_PCI; do
+      grep -qE "^CONFIG_${option}=[ym]$" "${config}" || missing+=("CONFIG_${option}")
+    done
+  fi
+  if (( ${#missing[@]} > 0 )); then
+    log "Graphics policy was not satisfied after olddefconfig: ${missing[*]}"
     exit 1
   fi
 }
@@ -537,6 +644,7 @@ prepare_kernel_tree() {
   merge_kernel_config "${source_dir}"
   make -C /usr/src/linux olddefconfig prepare modules_prepare 2>&1 | tee -a "${CONTAINER_LOG}"
   assert_boot_critical_kernel_config
+  assert_graphics_kernel_config
 }
 
 build_kernel_artifacts() {
@@ -567,6 +675,8 @@ build_kernel_artifacts() {
     printf 'kernel_release=%s\n' "${kernel_release}"
     printf 'kernel_source=sys-kernel/gentoo-sources\n'
     printf 'zfs_module_source=sys-fs/zfs-kmod\n'
+    printf 'video_cards=%s\n' "${VIDEO_CARDS_POLICY}"
+    printf 'drm_drivers=%s\n' "${DRM_DRIVERS_POLICY}"
   } > "${KERNEL_STAGE_ROOT}/usr/src/oxysos/build-metadata.env"
 
   archive_name="kernel-${ARCH_NAME}-${kernel_release}-${BUILD_ID}.tar.gz"
@@ -636,6 +746,27 @@ ensure_elfutils() {
   emerge --verbose dev-libs/elfutils 2>&1 | tee -a "${log_file}"
 }
 
+validate_mesa_build_policy() {
+  local vdb use_flags card flag
+  local -a missing=()
+  vdb="$(find /var/db/pkg/media-libs -mindepth 1 -maxdepth 1 -type d -name 'mesa-*' -print 2>/dev/null | sort -V | tail -n 1)"
+  if [[ -z "${vdb}" || ! -f "${vdb}/USE" ]]; then
+    log "Mesa policy validation failed: installed Mesa VDB metadata is missing"
+    exit 1
+  fi
+  use_flags="$(<"${vdb}/USE")"
+  for card in ${VIDEO_CARDS_POLICY}; do
+    flag="video_cards_${card}"
+    [[ " ${use_flags} " == *" ${flag} "* ]] || missing+=("${flag}")
+  done
+  if (( ${#missing[@]} > 0 )); then
+    log "Installed Mesa does not satisfy graphics build policy: missing ${missing[*]}"
+    log "Reject the cached binpackage and rebuild media-libs/mesa from source."
+    exit 1
+  fi
+  log "Validated installed Mesa USE flags for VIDEO_CARDS='${VIDEO_CARDS_POLICY}'"
+}
+
 run_emerge() {
   local atom="$1"
   local start end elapsed suffix log_file
@@ -656,6 +787,10 @@ run_emerge() {
   fi
 
   emerge_package "${atom}" "${log_file}"
+
+  if [[ "$(package_key "${atom}")" == "media-libs/mesa" ]]; then
+    validate_mesa_build_policy
+  fi
 
   end="$(date +%s)"
   elapsed="$((end - start))"
@@ -698,6 +833,7 @@ emerge_package() {
 
 main() {
   ensure_dirs
+  resolve_graphics_policy
   ensure_profile
   write_portage_config
 

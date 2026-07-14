@@ -24,6 +24,7 @@ pub struct SystemManifest {
     pub bootloader: Option<Bootloader>,
     pub display_stack: Option<DisplayStack>,
     pub audio_stack: Option<AudioStack>,
+    pub session: Session,
     pub prefer_binary: bool,
     pub services: Services,
     pub users: Vec<User>,
@@ -100,22 +101,131 @@ Used to define Btrfs-style subvolumes. Defaults are:
 ---
 
 ## 3. Hardware (`hardware`)
-The `hardware` block controls GPU and power optimization profiles.
+The `hardware` block controls graphics and power optimization policies.
 
 * **Struct:** [Hardware](oxys/src/manifest.rs#L442-L447)
 
 | Field | Type | Default | Description | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| `gpu` | `Gpu` | `Gpu::Auto` | GPU settings: `Auto`, `Single(GpuVendor)`, or `Hybrid { igpu: GpuVendor, dgpu: GpuVendor }`. | 🟢 **Fully Implemented** |
+| `graphics` | `Graphics` | `Graphics::default()` | Mesa, DRM, NVIDIA, PRIME, and VM graphics policy. | 🟢 **Resolved policy and source-image capability validation implemented** |
 | `power` | [Power](oxys/src/manifest.rs#L892-L897) | `Power::Auto` | Power daemon selector: `Auto`, `None`, `Tlp`, `AsusCtl`. | 🟢 **Fully Implemented** |
 
 > [!NOTE]
-> `GpuVendor` supports: `Amd`, `Intel`, `Nvidia`.
-> Hybrid GPU configurations automatically enable PRIME offloading support in X11/Wayland integrations.
+> The retired TOML field `hardware.gpu` remains readable for one compatibility
+> release and is converted to `Graphics`; newly generated manifests write only
+> `hardware.graphics`.
+
+`Graphics` contains:
+
+- `mesa: MesaGraphics`, with `VideoCards::Auto` or `Explicit(Vec<VideoCard>)`
+  and a `SoftwareRenderer` policy;
+- `drm: Drm`, with `DrmDrivers::Auto` or `Explicit(Vec<DrmDriver>)`;
+- `nvidia: Option<Nvidia>`, selecting `Proprietary`/`Nouveau`, modesetting,
+  and `PrimeMode::{Disabled, Primary, Offload}`;
+- `vm_support: VmGraphics::{None, Virgl, Vmware}`.
+
+Before an install plan is returned, Oxys resolves `VideoCards::Auto` and
+`DrmDrivers::Auto` from the graphics value captured in the manifest (bundled
+configs use `detect_graphics()`), then validates immutable source-image
+capabilities:
+
+- each required Mesa `VIDEO_CARDS` capability must have its expected DRI or
+  Vulkan artifact under the source root;
+- each resolved DRM driver must have its required enabled/built-in kernel
+  options in `boot/config-*` or `usr/src/linux/.config`;
+- proprietary NVIDIA requires an installed `nvidia-drivers` capability and an
+  `nvidia_drm` module matching the installed kernel ABI;
+- proprietary NVIDIA and Nouveau are mutually exclusive;
+- Virgl and VMware VM policies add their Mesa and kernel requirements.
+
+Newly built ISO images record these facts in
+`/usr/share/oxys/image-capabilities.toml`, generated from installed Portage
+metadata, driver artifacts, and the injected kernel configuration. A SHA-256
+sidecar is verified before the contract is trusted. VM entries also record the
+required launch device (`virtio-vga-gl` for Virgl or `vmware-svga` for VMware),
+so renderer support is not confused with a complete VM contract. Older images
+without the contract remain supported through direct artifact and
+kernel-config probing; a present but invalid or tampered contract is an
+installation error.
+
+Pass a compiled, checksummed manifest to both image builders with
+`OXYS_GRAPHICS_MANIFEST=/path/to/manifest.toml`. They call
+`oxys graphics-build-policy`, derive matching `OXYS_VIDEO_CARDS` and
+`OXYS_DRM_DRIVERS` values from the resolved policy, and reject a mixture of
+manifest-derived and manually supplied values. The two explicit variables
+remain available as a lower-level override when no manifest is supplied.
+
+Mesa is excluded from binary-package reuse and its installed USE
+flags/artifacts are verified; requested DRM symbols are appended to the kernel
+configuration, checked after `olddefconfig`, and recorded in artifact
+metadata. This prevents an old cache entry or mismatched prebuilt kernel from
+weakening the contract.
+
+The rendered install plan includes the graphics decisions and capability
+evidence before the first copy/mutation step. Missing capabilities stop
+planning with the exact artifact or kernel option that is absent.
+
+`PrimeMode::Primary` writes the NVIDIA variables globally.
+`PrimeMode::Offload` keeps those variables exclusively in `prime-run`, detects
+the integrated and NVIDIA render nodes, and pins Niri to the integrated node.
+Oxys also installs `oxys-graphics-diagnostics` to report libseat selection,
+DRM nodes/modules, and the active Mesa renderer.
+
+Proprietary NVIDIA modules must match the recorded kernel ABI. Secure Boot
+module signing/enrolment is not currently provisioned by Oxys; keep Secure
+Boot disabled for proprietary NVIDIA images unless those modules are signed
+and their key is enrolled separately.
+
+## 4. Session (`session`)
+
+The session block models how a user enters and runs a desktop session. The
+installer resolves it before producing any target-mutating steps, records the
+decisions and requirements in the rendered plan, and merges derived packages,
+services, and groups into the effective install manifest.
+
+| Field | Type | Default |
+| :--- | :--- | :--- |
+| `mode` | `SessionMode::{Auto, Text, Graphical}` | `Text` |
+| `user` | `SessionUser::{FirstConfigured, Named, Index}` | `FirstConfigured` |
+| `login` | `LoginFrontend::{Tty, OxysLogin}` | `OxysLogin { tty: 1, fallback_tty_login: true }` |
+| `compositor` | `Compositor` | `Niri` |
+| `desktop_shell` | `Option<DesktopShell>` | `None` |
+| `seat` | `SeatBackend::{Auto, Seatd, Logind, Direct}` | `Auto` |
+| `session_tracker` | `SessionTracker::{Auto, Elogind, Systemd, Pam, None}` | `Auto` |
+
+The default is `SessionMode::Text`; graphical login is never inferred for a
+new or omitted session block. Explicit `SessionMode::Auto` remains accepted
+for older/third-party configurations, infers a graphical session from a
+declared `gui-wm/niri` package, and emits a deprecation warning with the
+migration path. An explicit `Text` selection always overrides package
+inference. The initial
+graphical implementation supports tty1, Niri/Wayland, and the conservative
+Seatd/Elogind or Logind/Systemd compatibility combinations.
+
+Migration is mechanical: replace `mode: SessionMode::Auto` with `Text` for a
+console-only system, or declare `Graphical` plus the intended user, login,
+compositor, shell, seat, and tracker as shown in
+`docs/examples/desktop-session-proposed.fe2o3`.
+
+For the OpenRC Seatd/Elogind desktop policy, resolution derives:
+
+- Niri, D-Bus, Seatd, elogind, and selected shell/audio packages;
+- `dbus`, `seatd`, and `elogind` services;
+- `video`, `input`, and `audio` access for the selected session user;
+- `LIBSEAT_BACKEND=seatd` and the Wayland XDG session environment;
+- PAM → D-Bus → Seatd → Niri → PipeWire/WirePlumber → Noctalia startup order.
+
+The generated `/etc/oxys/session.env` is consumed by `oxys-login`. The
+`fallback_tty_login` setting controls whether Ctrl+Q can replace the greeter
+with `/bin/login`. Before returning an install plan, graphical sessions also
+preflight the immutable source-image requirements: executable `oxys-login`,
+`agetty`, and (when fallback is enabled) `login` binaries, plus PAM login
+configuration. An unsupported OxysLogin TTY is rejected even in text mode;
+text mode does not silently normalize it to tty1.
 
 ---
 
-## 4. Kernel Command-line (`kernel`)
+## 5. Kernel Command-line (`kernel`)
 The `kernel` block controls kernel-specific options.
 
 * **Struct:** [Kernel](oxys/src/manifest.rs#L450-L453)

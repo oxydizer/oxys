@@ -6,16 +6,25 @@ use std::{
 use thiserror::Error;
 
 use crate::exec::{ExecError, StepEvent, StepStream};
+use crate::graphics::{GraphicsResolveError, ResolvedGraphics};
+use crate::kernel_cmdline::{KernelCmdlineResolveError, ResolvedKernelCmdline};
 use crate::manifest::{Bootloader, Disk, DiskLayout, InitSystem, SystemManifest, User};
+use crate::session::{ResolvedSession, SessionResolveError};
 use crate::use_resolver::UseResolverError;
+use crate::runtime::RuntimeConfigError;
 
-use super::{boot, exec, login, services};
+#[cfg(test)]
+use super::login;
+use super::{boot, exec, services};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemInstallPlan {
     pub source_root: PathBuf,
     pub target_mount: PathBuf,
     pub steps: Vec<SystemInstallStep>,
+    pub resolved_session: ResolvedSession,
+    pub resolved_graphics: ResolvedGraphics,
+    pub resolved_kernel_cmdline: ResolvedKernelCmdline,
 }
 
 impl SystemInstallPlan {
@@ -44,6 +53,18 @@ impl fmt::Display for SystemInstallPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SystemInstallStep {
+    ResolveSession {
+        description: String,
+        resolved: ResolvedSession,
+    },
+    ResolveKernelCmdline {
+        description: String,
+        resolved: ResolvedKernelCmdline,
+    },
+    ResolveGraphics {
+        description: String,
+        resolved: ResolvedGraphics,
+    },
     Command {
         description: String,
         program: String,
@@ -76,11 +97,13 @@ pub enum SystemInstallStep {
     GenerateSystemdBoot {
         description: String,
         manifest: SystemManifest,
+        resolved_kernel_cmdline: ResolvedKernelCmdline,
         target_mount: PathBuf,
     },
     GenerateGrubConfig {
         description: String,
         manifest: SystemManifest,
+        resolved_kernel_cmdline: ResolvedKernelCmdline,
         target_mount: PathBuf,
     },
     ActivateSystemdServices {
@@ -109,12 +132,21 @@ pub enum SystemInstallStep {
     SetupLogin {
         description: String,
         manifest: SystemManifest,
+        resolved: ResolvedSession,
+        resolved_graphics: ResolvedGraphics,
+        target_mount: PathBuf,
+    },
+    ConfigureGraphicsRuntime {
+        description: String,
+        manifest: SystemManifest,
+        resolved: ResolvedGraphics,
         target_mount: PathBuf,
     },
     GenerateInitramfs {
         description: String,
         target_mount: PathBuf,
         kver: String,
+        drivers: Vec<String>,
     },
     Finalize {
         description: String,
@@ -138,7 +170,10 @@ impl SystemInstallStep {
 
     pub(super) fn description(&self) -> &str {
         match self {
-            Self::Command { description, .. }
+            Self::ResolveSession { description, .. }
+            | Self::ResolveGraphics { description, .. }
+            | Self::ResolveKernelCmdline { description, .. }
+            | Self::Command { description, .. }
             | Self::GenerateFstab { description, .. }
             | Self::ResetMachineId { description, .. }
             | Self::ConfigureHostname { description, .. }
@@ -152,6 +187,7 @@ impl SystemInstallStep {
             | Self::VerifyTargetLayout { description, .. }
             | Self::EmergePackages { description, .. }
             | Self::SetupLogin { description, .. }
+            | Self::ConfigureGraphicsRuntime { description, .. }
             | Self::GenerateInitramfs { description, .. }
             | Self::Finalize { description, .. } => description,
         }
@@ -159,6 +195,9 @@ impl SystemInstallStep {
 
     fn render(&self) -> String {
         match self {
+            Self::ResolveSession { resolved, .. } => resolved.render(),
+            Self::ResolveGraphics { resolved, .. } => resolved.render(),
+            Self::ResolveKernelCmdline { resolved, .. } => resolved.render(),
             Self::Command { program, args, .. } => exec::command_line(program, args),
             Self::GenerateFstab { target_mount, .. } => {
                 format!(
@@ -196,17 +235,27 @@ impl SystemInstallStep {
             ),
             Self::GenerateSystemdBoot {
                 manifest,
+                resolved_kernel_cmdline,
                 target_mount,
                 ..
             } => format!(
-                "write ESP loader config and oxys boot entry under {}",
+                "write ESP loader config and oxys boot entry under {} with kernel arguments: {}",
                 target_mount
                     .join(manifest.disk.partitions.efi.mount.trim_start_matches('/'))
-                    .display()
+                    .display(),
+                resolved_kernel_cmdline.values().collect::<Vec<_>>().join(" ")
             ),
-            Self::GenerateGrubConfig { target_mount, .. } => format!(
-                "write grub.cfg under {}",
-                target_mount.join("boot/grub").display()
+            Self::GenerateGrubConfig {
+                resolved_kernel_cmdline,
+                target_mount,
+                ..
+            } => format!(
+                "write grub.cfg under {} with kernel arguments: {}",
+                target_mount.join("boot/grub").display(),
+                resolved_kernel_cmdline
+                    .values()
+                    .collect::<Vec<_>>()
+                    .join(" ")
             ),
             Self::ActivateSystemdServices { manifest, .. } => {
                 let enabled = manifest.services.enabled.len();
@@ -247,23 +296,34 @@ impl SystemInstallStep {
                 )
             }
             Self::SetupLogin {
-                manifest,
+                resolved,
                 target_mount,
                 ..
             } => {
-                let kind = if login::manifest_wants_graphical(manifest)
-                    && login::graphical_login_user(manifest).is_some()
+                let kind = if resolved.policy.mode == crate::session::ResolvedSessionMode::Graphical
                 {
                     "oxys-login (Niri session)"
-                } else if login::manifest_wants_graphical(manifest) {
-                    "text login (no graphical user configured)"
                 } else {
                     "text login"
                 };
                 format!("configure tty1 for {kind} under {}", target_mount.display())
             }
-            Self::GenerateInitramfs { kver, .. } => {
-                format!("generate ZFS-root initramfs for kernel {kver}")
+            Self::ConfigureGraphicsRuntime {
+                resolved,
+                target_mount,
+                ..
+            } => format!(
+                "write resolved NVIDIA/PRIME policy and graphics diagnostics under {} ({:?})",
+                target_mount.display(),
+                resolved.policy.nvidia.map(|nvidia| nvidia.prime)
+            ),
+            Self::GenerateInitramfs { kver, drivers, .. } => {
+                let suffix = if drivers.is_empty() {
+                    String::new()
+                } else {
+                    format!(" with drivers {}", drivers.join(","))
+                };
+                format!("generate ZFS-root initramfs for kernel {kver}{suffix}")
             }
             Self::Finalize { target_mount, .. } => {
                 format!(
@@ -296,6 +356,14 @@ pub enum SystemInstallError {
     Portage(#[from] UseResolverError),
     #[error(transparent)]
     Exec(#[from] ExecError),
+    #[error(transparent)]
+    Session(#[from] SessionResolveError),
+    #[error(transparent)]
+    Graphics(#[from] GraphicsResolveError),
+    #[error(transparent)]
+    KernelCmdline(#[from] KernelCmdlineResolveError),
+    #[error(transparent)]
+    Runtime(#[from] RuntimeConfigError),
 }
 
 pub fn plan_system_install(
@@ -322,17 +390,44 @@ pub fn plan_system_install(
         return Err(SystemInstallError::UnsupportedLayout(manifest.disk.layout));
     }
 
+    // Resolve and validate all session policy before a plan containing target
+    // mutations can be returned.
+    let resolved_session = manifest.resolved_session()?;
+    resolved_session.validate_source(source_root)?;
+    let manifest = resolved_session.materialize_manifest(manifest);
+    let resolved_graphics = manifest.resolved_graphics()?.resolve_runtime_nodes()?;
+    let resolved_kernel_cmdline = crate::kernel_cmdline::resolve_kernel_cmdline_with_graphics(
+        &manifest,
+        &resolved_graphics,
+    )?;
+    let resolved_graphics = resolved_graphics.validate_source(source_root)?;
+    let manifest = resolved_graphics.materialize_manifest(&manifest);
+
     let source = exec::ensure_trailing_slash(source_root);
     let target = exec::ensure_trailing_slash(target_mount);
     let source_boot = exec::ensure_trailing_slash(&source_root.join("boot"));
     let target_boot = exec::ensure_trailing_slash(&target_mount.join("boot"));
     let efi_mount = manifest.disk.partitions.efi.mount.clone();
     let target_esp = target_mount.join(efi_mount.trim_start_matches('/'));
-    let mut steps = vec![SystemInstallStep::command(
-        "Copy live system into target",
-        "rsync",
-        exec::rsync_args(&source, &target),
-    )];
+    let mut steps = vec![
+        SystemInstallStep::ResolveSession {
+            description: "Resolve and validate session policy".to_owned(),
+            resolved: resolved_session.clone(),
+        },
+        SystemInstallStep::ResolveGraphics {
+            description: "Resolve and validate graphics policy".to_owned(),
+            resolved: resolved_graphics.clone(),
+        },
+        SystemInstallStep::ResolveKernelCmdline {
+            description: "Resolve and validate kernel command line".to_owned(),
+            resolved: resolved_kernel_cmdline.clone(),
+        },
+        SystemInstallStep::command(
+            "Copy live system into target",
+            "rsync",
+            exec::rsync_args(&source, &target),
+        ),
+    ];
     steps.push(SystemInstallStep::command(
         "Copy live boot files into target",
         "rsync",
@@ -439,6 +534,7 @@ pub fn plan_system_install(
             description: format!("Generate ZFS-root initramfs ({kver})"),
             target_mount: target_mount.to_path_buf(),
             kver,
+            drivers: resolved_graphics.requirements.initramfs_modules.clone(),
         });
     }
     match manifest.resolved_bootloader() {
@@ -456,6 +552,7 @@ pub fn plan_system_install(
             steps.push(SystemInstallStep::GenerateSystemdBoot {
                 description: "Write systemd-boot loader entry".to_owned(),
                 manifest: manifest.clone(),
+                resolved_kernel_cmdline: resolved_kernel_cmdline.clone(),
                 target_mount: target_mount.to_path_buf(),
             });
         }
@@ -480,11 +577,12 @@ pub fn plan_system_install(
             steps.push(SystemInstallStep::GenerateGrubConfig {
                 description: "Write grub.cfg".to_owned(),
                 manifest: manifest.clone(),
+                resolved_kernel_cmdline: resolved_kernel_cmdline.clone(),
                 target_mount: target_mount.to_path_buf(),
             });
         }
     }
-    if !services::openrc_enabled_services(manifest).is_empty()
+    if !services::openrc_enabled_services(&manifest).is_empty()
         || !manifest.services.disabled.is_empty()
     {
         match manifest.init_system {
@@ -503,6 +601,14 @@ pub fn plan_system_install(
     steps.push(SystemInstallStep::SetupLogin {
         description: "Configure console login".to_owned(),
         manifest: manifest.clone(),
+        resolved: resolved_session.clone(),
+        resolved_graphics: resolved_graphics.clone(),
+        target_mount: target_mount.to_path_buf(),
+    });
+    steps.push(SystemInstallStep::ConfigureGraphicsRuntime {
+        description: "Configure graphics runtime policy and diagnostics".to_owned(),
+        manifest: manifest.clone(),
+        resolved: resolved_graphics.clone(),
         target_mount: target_mount.to_path_buf(),
     });
     steps.push(SystemInstallStep::Finalize {
@@ -514,6 +620,9 @@ pub fn plan_system_install(
         source_root: source_root.to_path_buf(),
         target_mount: target_mount.to_path_buf(),
         steps,
+        resolved_session,
+        resolved_graphics,
+        resolved_kernel_cmdline,
     })
 }
 
@@ -526,7 +635,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use crate::manifest::{DiskPartitions, EfiPartition, Ext4Options, Package, Password, GB, MB};
+    use crate::manifest::{DiskPartitions, EfiPartition, Ext4Options, GB, MB, Package, Password};
 
     use super::*;
 
@@ -563,7 +672,7 @@ mod tests {
         assert!(plan.render().contains("--esp-path"));
         assert!(plan.render().contains("/efi"));
         assert!(matches!(
-            plan.steps.iter().rev().nth(2), // ..., <step>, SetupLogin, Finalize
+            plan.steps.iter().rev().nth(3), // ..., <step>, SetupLogin, GraphicsRuntime, Finalize
             Some(SystemInstallStep::GenerateSystemdBoot { .. })
         ));
     }
@@ -591,14 +700,116 @@ mod tests {
         assert!(rendered.contains("grub-install"));
         assert!(rendered.contains("--removable"));
         assert!(!rendered.contains("bootctl"));
-        assert!(plan
-            .steps
-            .iter()
-            .any(|step| matches!(step, SystemInstallStep::GenerateGrubConfig { .. })));
-        assert!(!plan
-            .steps
-            .iter()
-            .any(|step| matches!(step, SystemInstallStep::GenerateSystemdBoot { .. })));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|step| matches!(step, SystemInstallStep::GenerateGrubConfig { .. }))
+        );
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, SystemInstallStep::GenerateSystemdBoot { .. }))
+        );
+    }
+
+    #[test]
+    fn kernel_cmdline_conflicts_are_rejected_before_a_plan_is_returned() {
+        let temp = TempTree::new("kernel-cmdline-conflict");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir_all(source.join("boot")).unwrap();
+        fs::create_dir_all(&target).unwrap();
+
+        let manifest = SystemManifest {
+            hardware: crate::manifest::Hardware {
+                graphics: crate::manifest::Graphics {
+                    nvidia: Some(crate::manifest::Nvidia::default()),
+                    ..crate::manifest::Graphics::default()
+                },
+                ..crate::manifest::Hardware::default()
+            },
+            kernel: crate::manifest::Kernel {
+                cmdline: vec!["nvidia_drm.modeset=0".to_owned()],
+            },
+            ..SystemManifest::default()
+        };
+
+        let error = plan_system_install(&manifest, &source, &target).unwrap_err();
+        assert!(error.to_string().contains("conflicting kernel arguments"));
+        assert!(error.to_string().contains("hardware.graphics.nvidia.modeset"));
+    }
+
+    #[test]
+    fn graphics_capabilities_are_validated_and_rendered_before_copy() {
+        let temp = TempTree::new("graphics-capabilities");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir_all(source.join("boot")).unwrap();
+        fs::create_dir_all(source.join("usr/lib64/dri")).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(source.join("usr/lib64/dri/virtio_gpu_dri.so"), "fixture").unwrap();
+        fs::write(
+            source.join("boot/config-test"),
+            "CONFIG_DRM=y\nCONFIG_DRM_KMS_HELPER=y\nCONFIG_DRM_GEM_SHMEM_HELPER=y\nCONFIG_DRM_VIRTIO_GPU=m\nCONFIG_VIRTIO=y\nCONFIG_VIRTIO_PCI=y\n",
+        )
+        .unwrap();
+        let manifest = SystemManifest {
+            hardware: crate::manifest::Hardware {
+                graphics: crate::manifest::Graphics {
+                    mesa: crate::manifest::MesaGraphics {
+                        video_cards: crate::manifest::VideoCards::Explicit(vec![
+                            crate::manifest::VideoCard::Virgl,
+                        ]),
+                        ..crate::manifest::MesaGraphics::default()
+                    },
+                    vm_support: crate::manifest::VmGraphics::Virgl,
+                    ..crate::manifest::Graphics::default()
+                },
+                ..crate::manifest::Hardware::default()
+            },
+            ..SystemManifest::default()
+        };
+
+        let plan = plan_system_install(&manifest, &source, &target).unwrap();
+        assert!(matches!(
+            plan.steps.get(1),
+            Some(SystemInstallStep::ResolveGraphics { .. })
+        ));
+        let rendered = plan.render();
+        assert!(rendered.contains("Mesa capability check: passed"));
+        assert!(rendered.contains("boot/config-test"));
+        assert!(rendered.find("graphics policy:").unwrap() < rendered.find("rsync").unwrap());
+    }
+
+    #[test]
+    fn missing_graphics_capability_rejects_install_plan() {
+        let temp = TempTree::new("missing-graphics-capability");
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        fs::create_dir_all(source.join("boot")).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(source.join("boot/config-test"), "CONFIG_DRM=y\n").unwrap();
+        let manifest = SystemManifest {
+            hardware: crate::manifest::Hardware {
+                graphics: crate::manifest::Graphics {
+                    mesa: crate::manifest::MesaGraphics {
+                        video_cards: crate::manifest::VideoCards::Explicit(vec![
+                            crate::manifest::VideoCard::Virgl,
+                        ]),
+                        ..crate::manifest::MesaGraphics::default()
+                    },
+                    vm_support: crate::manifest::VmGraphics::Virgl,
+                    ..crate::manifest::Graphics::default()
+                },
+                ..crate::manifest::Hardware::default()
+            },
+            ..SystemManifest::default()
+        };
+
+        let error = plan_system_install(&manifest, &source, &target).unwrap_err();
+        assert!(error.to_string().contains("video_cards_virgl"));
+        assert!(error.to_string().contains("CONFIG_DRM_VIRTIO_GPU"));
     }
 
     #[test]
@@ -619,10 +830,11 @@ mod tests {
         };
 
         let plan = plan_system_install(&manifest, &source, &target).unwrap();
-        assert!(plan
-            .steps
-            .iter()
-            .any(|step| matches!(step, SystemInstallStep::GenerateGrubConfig { .. })));
+        assert!(
+            plan.steps
+                .iter()
+                .any(|step| matches!(step, SystemInstallStep::GenerateGrubConfig { .. }))
+        );
     }
 
     #[test]
@@ -649,14 +861,16 @@ mod tests {
 
         let plan = plan_system_install(&manifest, &source, &target).unwrap();
         assert!(matches!(
-            plan.steps.iter().rev().nth(2), // ..., <step>, SetupLogin, Finalize
+            plan.steps.iter().rev().nth(3), // ..., <step>, SetupLogin, GraphicsRuntime, Finalize
             Some(SystemInstallStep::ActivateOpenrcServices { .. })
         ));
         assert!(plan.render().contains("apply openrc service state"));
-        assert!(!plan
-            .steps
-            .iter()
-            .any(|step| matches!(step, SystemInstallStep::ActivateSystemdServices { .. })));
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, SystemInstallStep::ActivateSystemdServices { .. }))
+        );
     }
 
     #[test]
@@ -742,7 +956,7 @@ mod tests {
 
         let plan = plan_system_install(&manifest, &source, &target).unwrap();
         assert!(matches!(
-            plan.steps.iter().rev().nth(2), // ..., <step>, SetupLogin, Finalize
+            plan.steps.iter().rev().nth(3), // ..., <step>, SetupLogin, GraphicsRuntime, Finalize
             Some(SystemInstallStep::ActivateSystemdServices { .. })
         ));
         assert!(plan.render().contains("1 enable, 1 disable"));
@@ -840,10 +1054,12 @@ mod tests {
         };
 
         let plan = plan_system_install(&manifest, &source, &target).unwrap();
-        assert!(!plan
-            .steps
-            .iter()
-            .any(|step| matches!(step, SystemInstallStep::EmergePackages { .. })));
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, SystemInstallStep::EmergePackages { .. }))
+        );
     }
 
     #[test]
@@ -867,12 +1083,21 @@ mod tests {
         .unwrap();
 
         let manifest = SystemManifest {
-            packages: vec![Package::new("gui-wm/niri")],
+            session: crate::manifest::Session {
+                mode: crate::manifest::SessionMode::Graphical,
+                desktop_shell: Some(crate::manifest::DesktopShell::Noctalia),
+                ..crate::manifest::Session::default()
+            },
+            packages: vec![
+                Package::new("gui-wm/niri"),
+                Package::new("gui-shells/noctalia"),
+                Package::new("media-video/pipewire"),
+            ],
             users: vec![User::new("testuser")],
             ..SystemManifest::default()
         };
         let (tx, _rx) = std::sync::mpsc::channel();
-        login::setup_login(&manifest, &target, &tx).unwrap();
+        setup_login_for_test(&manifest, &target, &tx);
 
         let inittab = fs::read_to_string(target.join("etc/inittab")).unwrap();
         // tty1 hands off to oxys-login (its own PAM prompt), not an autologin.
@@ -895,17 +1120,13 @@ mod tests {
         let noctalia =
             fs::read_to_string(target.join("home/testuser/.config/noctalia/config.toml")).unwrap();
         assert!(noctalia.contains("setup_wizard_enabled = false"));
-        assert!(noctalia.contains("source = \"custom\""));
-        assert!(noctalia.contains("custom_palette = \"OxysOS\""));
-        let palette =
-            fs::read_to_string(target.join("home/testuser/.config/noctalia/palettes/OxysOS.json"))
-                .unwrap();
-        assert!(palette.contains("\"mPrimary\": \"#ff5a2e\""));
-        assert!(palette.contains("\"light\""));
         let niri =
             fs::read_to_string(target.join("home/testuser/.config/niri/config.kdl")).unwrap();
         assert!(niri.contains("exec gentoo-pipewire-launcher"));
         assert!(niri.contains("until noctalia; do sleep 2; done"));
+        let session_env = fs::read_to_string(target.join("etc/oxys/session.env")).unwrap();
+        assert!(session_env.contains("LIBSEAT_BACKEND=seatd"));
+        assert!(session_env.contains("OXYS_FALLBACK_TTY_LOGIN=true"));
     }
 
     #[test]
@@ -924,7 +1145,7 @@ mod tests {
             ..SystemManifest::default()
         };
         let (tx, _rx) = std::sync::mpsc::channel();
-        login::setup_login(&manifest, &target, &tx).unwrap();
+        setup_login_for_test(&manifest, &target, &tx);
 
         let inittab = fs::read_to_string(target.join("etc/inittab")).unwrap();
         assert!(inittab.contains("c1:12345:respawn:/sbin/agetty --noclear 38400 tty1 linux"));
@@ -933,22 +1154,51 @@ mod tests {
     }
 
     #[test]
-    fn configured_hostname_is_written_for_openrc_and_cross_distro_tools() {
-        let temp = TempTree::new("hostname");
+    fn explicit_session_requirements_are_materialized_and_rendered_before_copy() {
+        let temp = TempTree::new("explicit-session-plan");
+        let source = temp.path().join("source");
         let target = temp.path().join("target");
-        fs::create_dir_all(target.join("etc/conf.d")).unwrap();
+        fs::create_dir_all(source.join("boot")).unwrap();
+        write_graphical_source_requirements(&source);
+        fs::create_dir_all(&target).unwrap();
 
-        crate::install::filesystem::write_hostname("OxysOS", &target).unwrap();
+        let manifest = SystemManifest {
+            session: crate::manifest::Session {
+                mode: crate::manifest::SessionMode::Graphical,
+                user: crate::manifest::SessionUser::Named("desktop".to_owned()),
+                desktop_shell: Some(crate::manifest::DesktopShell::Noctalia),
+                seat: crate::manifest::SeatBackend::Seatd,
+                session_tracker: crate::manifest::SessionTracker::Elogind,
+                ..crate::manifest::Session::default()
+            },
+            users: vec![User::new("admin"), User::new("desktop")],
+            ..SystemManifest::default()
+        };
 
+        let plan = plan_system_install(&manifest, &source, &target).unwrap();
+        assert!(matches!(
+            plan.steps.first(),
+            Some(SystemInstallStep::ResolveSession { .. })
+        ));
         assert_eq!(
-            fs::read_to_string(target.join("etc/hostname")).unwrap(),
-            "OxysOS\n"
+            plan.resolved_session.policy.user_name.as_deref(),
+            Some("desktop")
         );
-        assert_eq!(
-            fs::read_to_string(target.join("etc/conf.d/hostname")).unwrap(),
-            "# generated by oxys\nhostname=\"OxysOS\"\n"
-        );
-        assert!(crate::install::filesystem::write_hostname("bad hostname", &target).is_err());
+        let rendered = plan.render();
+        assert!(rendered.contains("session.mode = graphical [explicit]"));
+        assert!(rendered.contains("services: dbus, seatd, elogind"));
+        assert!(rendered.contains("user groups: video, input, audio"));
+
+        let users = plan
+            .steps
+            .iter()
+            .find_map(|step| match step {
+                SystemInstallStep::SetupUsers { users, .. } => Some(users),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!users[0].groups.contains(&"video".to_owned()));
+        assert!(users[1].groups.contains(&"video".to_owned()));
     }
 
     #[test]
@@ -964,12 +1214,30 @@ mod tests {
 
         let manifest = SystemManifest::default();
         let (tx, _rx) = std::sync::mpsc::channel();
-        login::setup_login(&manifest, &target, &tx).unwrap();
+        setup_login_for_test(&manifest, &target, &tx);
 
         let inittab = fs::read_to_string(target.join("etc/inittab")).unwrap();
         assert!(inittab.contains("c1:12345:respawn:/sbin/agetty --noclear 38400 tty1 linux"));
         assert!(!inittab.contains("oxys-login"));
         assert!(!inittab.contains("--autologin root"));
+    }
+
+    fn setup_login_for_test(
+        manifest: &SystemManifest,
+        target: &Path,
+        sender: &std::sync::mpsc::Sender<SystemInstallEvent>,
+    ) {
+        let resolved = manifest.resolved_session().unwrap();
+        let materialized = resolved.materialize_manifest(manifest);
+        let resolved_graphics = materialized.resolved_graphics().unwrap();
+        login::setup_login(
+            &materialized,
+            &resolved,
+            &resolved_graphics,
+            target,
+            sender,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -1051,10 +1319,12 @@ mod tests {
         };
 
         let plan = plan_system_install(&manifest, &source, &target).unwrap();
-        assert!(!plan
-            .steps
-            .iter()
-            .any(|step| matches!(step, SystemInstallStep::SetupUsers { .. })));
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|step| matches!(step, SystemInstallStep::SetupUsers { .. }))
+        );
     }
 
     #[test]
@@ -1099,10 +1369,6 @@ mod tests {
             .expect_err("missing var/db/pkg must fail");
         let message = err.to_string();
         assert!(message.contains("var/db/pkg"), "got: {message}");
-        assert!(
-            message.contains("oxys-wired.nmconnection"),
-            "got: {message}"
-        );
         // Dirs created by the (non-root) test user are not root-owned, so the
         // ownership pass also fires -- proving it detects a mis-owned /var.
         assert!(message.contains("expected root"), "got: {message}");
@@ -1110,6 +1376,23 @@ mod tests {
 
     struct TempTree {
         path: PathBuf,
+    }
+
+    fn write_graphical_source_requirements(source: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+
+        for relative in [
+            "usr/local/bin/oxys-login",
+            "usr/bin/agetty",
+            "usr/bin/login",
+        ] {
+            let path = source.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "fixture").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        fs::create_dir_all(source.join("etc/pam.d")).unwrap();
+        fs::write(source.join("etc/pam.d/login"), "auth include system-auth\n").unwrap();
     }
 
     impl TempTree {

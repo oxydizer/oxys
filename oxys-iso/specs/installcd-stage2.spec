@@ -117,25 +117,28 @@ boot/kernel/oxys/distkernel: yes
 # installer starts (see fsscript.sh).
 boot/kernel/oxys/dracut_args: --xz --no-hostonly -a dmsquash-live -o btrfs -o crypt -o i18n -o qemu -o qemu-net -o nvdimm -o multipath
 
-# ---- size trim: drop *most* of the build toolchain from the live image ----
-# This is a trimmed subset of the upstream installcd unmerge list. It keeps the
-# ISO small. The standalone installer is built before this stage and copied in
-# via overlay.
+# ---- size trim: drop docs only, KEEP the build toolchain ----
+# CRITICAL: the installer rsyncs this live root to the target *verbatim* (see
+# install/exec.rs::rsync_args -- excludes are only runtime/cache dirs, nothing
+# under /usr). So the live root IS the installed root. Anything unmerged or
+# emptied here is missing on every installed system, not just the live ISO.
 #
-# DO NOT add sys-devel/gcc or sys-devel/binutils here. Unlike the upstream
-# installcd, OxysOS compiles the user's Rust config into a manifest ON the live
+# A normal installed OxysOS is a full Gentoo where the user runs `emerge`. That
+# needs the whole C build toolchain: glibc headers (/usr/include), linux-headers,
+# make, patch, m4, autoconf, automake -- plus gcc/binutils. gcc/binutils were
+# always kept (see below); the headers + make/patch/m4/autotools were formerly
+# stripped, which left the installed system unable to compile C packages
+# (missing /usr/include/stdio.h, no `make`, etc.). They are kept now too. The
+# incremental size is small next to the gcc/binutils already retained.
+#
+# DO NOT add sys-devel/gcc or sys-devel/binutils here either. Beyond the emerge
+# use above, OxysOS compiles the user's Rust config into a manifest ON the live
 # system (oxys::compile -> cargo build), and rustc shells out to `cc` (gcc) as
 # its linker driver, which in turn calls `ld`/`as` (binutils). Unmerging either
-# breaks that on-target build with `error: linker `cc` not found`. The pure-Rust
-# vendored crates (see build-installer-overlay.sh) need no C headers/make, so the
-# rest of the toolchain below can still go -- only the linker must stay.
+# breaks that on-target build with `error: linker `cc` not found`.
+#
+# Only pure documentation is dropped below -- it never affects compilation.
 livecd/unmerge:
-	dev-build/autoconf
-	dev-build/automake
-	dev-build/make
-	sys-devel/m4
-	sys-devel/patch
-	sys-kernel/linux-headers
 	app-portage/gentoolkit
 	sys-apps/texinfo
 	sys-apps/man-db
@@ -145,7 +148,6 @@ livecd/empty:
 	/var/cache
 	/var/tmp
 	/tmp
-	/usr/include
 	/usr/share/man
 	/usr/share/doc
 	/usr/share/info

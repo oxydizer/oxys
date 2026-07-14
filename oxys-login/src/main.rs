@@ -64,6 +64,7 @@ struct App {
     boot_time: String,
     spinner_index: usize,
     auth_in_progress: bool,
+    fallback_tty_login: bool,
 }
 
 impl App {
@@ -82,6 +83,8 @@ impl App {
             boot_time: formatted_boot_time(),
             spinner_index: 0,
             auth_in_progress: false,
+            fallback_tty_login: session_config_value("OXYS_FALLBACK_TTY_LOGIN").as_deref()
+                != Some("false"),
         }
     }
 
@@ -225,13 +228,19 @@ enum LoopAction {
 
 fn handle_key_event(app: &mut App, key: KeyEvent) -> LoopAction {
     if app.auth_in_progress {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
+        if app.fallback_tty_login
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('q')
+        {
             return LoopAction::Quit;
         }
         return LoopAction::Continue;
     }
 
-    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
+    if app.fallback_tty_login
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && key.code == KeyCode::Char('q')
+    {
         return LoopAction::Quit;
     }
 
@@ -479,9 +488,12 @@ fn render_login(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .alignment(Alignment::Center);
     frame.render_widget(spinner, chunks[5]);
 
-    let status_text = app.status.as_deref().unwrap_or(
-        "Tab switches fields. Enter submits. Ctrl+Q opens TTY login. Ctrl+C is ignored.",
-    );
+    let help = if app.fallback_tty_login {
+        "Tab switches fields. Enter submits. Ctrl+Q opens TTY login. Ctrl+C is ignored."
+    } else {
+        "Tab switches fields. Enter submits. Ctrl+C is ignored."
+    };
+    let status_text = app.status.as_deref().unwrap_or(help);
     let status_color = if app.wrong_password {
         theme::WARN
     } else if app.auth_in_progress {
@@ -855,12 +867,49 @@ fn session_environment(
     );
     set_env_default(&mut environment, "XDG_SESSION_TYPE", "wayland");
     set_env_default(&mut environment, "XDG_SESSION_CLASS", "user");
+    for (key, value) in session_config() {
+        if key != "OXYS_FALLBACK_TTY_LOGIN" {
+            set_env_value(&mut environment, &key, &value);
+        }
+    }
     set_env_default(
         &mut environment,
         "PATH",
         "/usr/local/sbin:/usr/local/bin:/usr/bin:/bin",
     );
     environment
+}
+
+fn session_config() -> Vec<(String, String)> {
+    std::fs::read_to_string("/etc/oxys/session.env")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                return None;
+            }
+            let (key, value) = line.split_once('=')?;
+            Some((key.trim().to_owned(), value.trim().to_owned()))
+        })
+        .collect()
+}
+
+fn session_config_value(key: &str) -> Option<String> {
+    session_config()
+        .into_iter()
+        .find_map(|(name, value)| (name == key).then_some(value))
+}
+
+fn set_env_value(environment: &mut Vec<(String, String)>, key: &str, value: &str) {
+    if let Some((_, existing)) = environment
+        .iter_mut()
+        .find(|(existing_key, _)| existing_key == key)
+    {
+        *existing = value.to_owned();
+    } else {
+        environment.push((key.to_owned(), value.to_owned()));
+    }
 }
 
 fn set_env_default(environment: &mut Vec<(String, String)>, key: &str, value: &str) {

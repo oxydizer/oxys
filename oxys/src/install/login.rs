@@ -1,25 +1,12 @@
 use std::{fs, path::Path, sync::mpsc::Sender};
 
-use crate::manifest::{SystemManifest, User};
+use crate::{
+    graphics::ResolvedGraphics,
+    manifest::{DesktopShell, SystemManifest, User},
+    session::{ResolvedSession, ResolvedSessionMode},
+};
 
-use super::{run_chroot, write_file, SystemInstallError, SystemInstallEvent};
-
-pub(super) fn manifest_wants_graphical(manifest: &SystemManifest) -> bool {
-    manifest
-        .packages
-        .iter()
-        .any(|package| package.package.trim().starts_with("gui-wm/niri"))
-}
-
-/// Pick the account that owns the desktop session. This intentionally uses the
-/// first configured user: the installer UI already presents the manifest order
-/// to the operator, and the bundled desktop config has a single user.
-pub(super) fn graphical_login_user(manifest: &SystemManifest) -> Option<&User> {
-    manifest
-        .users
-        .iter()
-        .find(|user| !user.name.as_str().trim().is_empty())
-}
+use super::{SystemInstallError, SystemInstallEvent, run_chroot, write_file};
 
 /// Configure how the installed system logs in on tty1, and undo the live ISO's
 /// self-launch so the target never re-runs the installer.
@@ -34,6 +21,8 @@ pub(super) fn graphical_login_user(manifest: &SystemManifest) -> Option<&User> {
 /// installer launch from root's profile.
 pub(super) fn setup_login(
     manifest: &SystemManifest,
+    resolved: &ResolvedSession,
+    resolved_graphics: &ResolvedGraphics,
     target_mount: &Path,
     sender: &Sender<SystemInstallEvent>,
 ) -> Result<(), SystemInstallError> {
@@ -48,14 +37,19 @@ pub(super) fn setup_login(
         }
     }
 
-    let login_user = manifest_wants_graphical(manifest)
-        .then(|| graphical_login_user(manifest))
-        .flatten();
+    let login_user = resolved
+        .policy
+        .user_index
+        .and_then(|index| manifest.users.get(index));
     if let Some(user) = login_user {
-        write_graphical_session_files(user, target_mount, sender)?;
+        write_graphical_session_files(user, resolved, resolved_graphics, target_mount, sender)?;
     }
+    write_file(
+        &target_mount.join("etc/oxys/session.env"),
+        &system_session_config(resolved),
+    )?;
 
-    let tty1 = if login_user.is_some() {
+    let tty1 = if resolved.policy.mode == ResolvedSessionMode::Graphical {
         // Hand the raw console to oxys-login (running as root under agetty).
         // `--skip-login` suppresses agetty's own "login:" prompt because
         // oxys-login draws its own PAM login TUI; on success it setuids to the
@@ -95,8 +89,6 @@ pub(super) fn setup_login(
                 "tty1 login: oxys-login (PAM) -> niri --session, seeded for {}",
                 user.name.as_str()
             )
-        } else if manifest_wants_graphical(manifest) {
-            "tty1 login: agetty text login (no graphical user configured)".to_owned()
         } else {
             "tty1 login: agetty text login".to_owned()
         },
@@ -105,8 +97,22 @@ pub(super) fn setup_login(
     Ok(())
 }
 
+fn system_session_config(resolved: &ResolvedSession) -> String {
+    let fallback = match resolved.policy.login {
+        crate::manifest::LoginFrontend::OxysLogin {
+            fallback_tty_login, ..
+        } => fallback_tty_login,
+        crate::manifest::LoginFrontend::Tty { .. } => true,
+    };
+    let mut body = session_environment_contents(resolved);
+    body.push_str(&format!("OXYS_FALLBACK_TTY_LOGIN={fallback}\n"));
+    body
+}
+
 fn write_graphical_session_files(
     user: &User,
+    resolved: &ResolvedSession,
+    resolved_graphics: &ResolvedGraphics,
     target_mount: &Path,
     sender: &Sender<SystemInstallEvent>,
 ) -> Result<(), SystemInstallError> {
@@ -114,12 +120,21 @@ fn write_graphical_session_files(
     let home = target_mount.join("home").join(name);
     write_file(&home.join(".bash_profile"), &bash_profile_contents())?;
     write_file(&home.join(".bashrc"), &bashrc_contents())?;
-    write_file(&home.join(".config/niri/config.kdl"), NIRI_CONFIG)?;
-    write_file(&home.join(".config/noctalia/config.toml"), NOCTALIA_CONFIG)?;
     write_file(
-        &home.join(".config/noctalia/palettes/OxysOS.json"),
-        NOCTALIA_OXYSOS_PALETTE,
+        &home.join(".config/environment.d/90-oxys-session.conf"),
+        &session_environment_contents(resolved),
     )?;
+    write_file(
+        &home.join(".config/niri/config.kdl"),
+        &niri_config_contents(resolved, resolved_graphics),
+    )?;
+    if resolved.policy.desktop_shell == Some(DesktopShell::Noctalia) {
+        write_file(&home.join(".config/noctalia/config.toml"), NOCTALIA_CONFIG)?;
+        write_file(
+            &home.join(".config/noctalia/palettes/OxysOS.json"),
+            NOCTALIA_OXYSOS_PALETTE,
+        )?;
+    }
     write_file(&home.join(".config/foot/foot.ini"), FOOT_CONFIG)?;
     fs::create_dir_all(home.join("Pictures/Screenshots"))?;
 
@@ -144,6 +159,42 @@ fn write_graphical_session_files(
         line: format!("seeded Niri/Noctalia session files for {name}"),
     });
     Ok(())
+}
+
+fn session_environment_contents(resolved: &ResolvedSession) -> String {
+    let mut lines = vec!["# generated by oxys".to_owned()];
+    lines.extend(
+        resolved
+            .requirements
+            .environment
+            .iter()
+            .map(|(name, value)| format!("{name}={value}")),
+    );
+    lines.push(String::new());
+    lines.join("\n")
+}
+
+fn niri_config_contents(
+    resolved: &ResolvedSession,
+    resolved_graphics: &ResolvedGraphics,
+) -> String {
+    let mut config = NIRI_CONFIG
+        .lines()
+        .filter(|line| {
+            (resolved.policy.audio_stack == Some(crate::manifest::AudioStack::Pipewire)
+                || !line.contains("gentoo-pipewire-launcher"))
+                && (resolved.policy.desktop_shell == Some(DesktopShell::Noctalia)
+                    || !line.contains("until noctalia"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if let Some(prime) = &resolved_graphics.requirements.prime {
+        config.push_str(&format!(
+            "\n\ndebug {{\n    render-drm-device \"{}\"\n}}",
+            prime.compositor_gpu
+        ));
+    }
+    config + "\n"
 }
 
 fn target_passwd_has_user(target_mount: &Path, username: &str) -> bool {
@@ -180,9 +231,8 @@ startniri() {
         if [ -d "/run/user/${uid}" ] && [ -w "/run/user/${uid}" ]; then
             export XDG_RUNTIME_DIR="/run/user/${uid}"
         else
-            export XDG_RUNTIME_DIR="/tmp/xdg-runtime-${uid}"
-            mkdir -p "${XDG_RUNTIME_DIR}"
-            chmod 700 "${XDG_RUNTIME_DIR}"
+            echo "Oxys session tracker did not provide /run/user/${uid}" >&2
+            return 1
         fi
     fi
     export XDG_SESSION_TYPE=wayland
@@ -332,6 +382,55 @@ binds {
     Mod+Shift+P      { power-off-monitors; }
 }
 "##;
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        graphics::resolve_graphics,
+        manifest::{
+            Graphics, Hardware, MesaGraphics, Nvidia, PrimeMode, Session, SessionMode,
+            SystemManifest, User, VideoCard, VideoCards,
+        },
+    };
+
+    #[test]
+    fn niri_config_pins_the_resolved_prime_compositor_render_node() {
+        let manifest = SystemManifest {
+            session: Session {
+                mode: SessionMode::Graphical,
+                ..Session::default()
+            },
+            users: vec![User::new("alex")],
+            hardware: Hardware {
+                graphics: Graphics {
+                    mesa: MesaGraphics {
+                        video_cards: VideoCards::Explicit(vec![VideoCard::Intel]),
+                        ..MesaGraphics::default()
+                    },
+                    nvidia: Some(Nvidia {
+                        prime: PrimeMode::Offload,
+                        ..Nvidia::default()
+                    }),
+                    ..Graphics::default()
+                },
+                ..Hardware::default()
+            },
+            ..SystemManifest::default()
+        };
+        let session = manifest.resolved_session().unwrap();
+        let mut graphics = resolve_graphics(&manifest).unwrap();
+        graphics
+            .requirements
+            .prime
+            .as_mut()
+            .unwrap()
+            .compositor_gpu = "/dev/dri/renderD128".to_owned();
+
+        let config = super::niri_config_contents(&session, &graphics);
+        assert!(config.contains("debug {"));
+        assert!(config.contains("render-drm-device \"/dev/dri/renderD128\""));
+    }
+}
 
 const NOCTALIA_CONFIG: &str = r#"# OxysOS Noctalia v5 config.
 

@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUTPUT_DIR="${REPO_ROOT}/output"
 BUILD_LOG="${OUTPUT_DIR}/build.log"
+MONOREPO_ROOT="$(cd "${REPO_ROOT}/.." && pwd)"
 
 readonly -a NATIVE_ARCHES=(
   "alderlake"
@@ -19,6 +20,26 @@ timestamp() {
 
 log() {
   printf '[%s] %s\n' "$(timestamp)" "$*" | tee -a "${BUILD_LOG}"
+}
+
+resolve_manifest_graphics_policy() {
+  [[ -n "${OXYS_GRAPHICS_MANIFEST:-}" ]] || return 0
+  if [[ -n "${OXYS_VIDEO_CARDS:-}" || -n "${OXYS_DRM_DRIVERS:-}" ]]; then
+    printf 'OXYS_GRAPHICS_MANIFEST cannot be combined with explicit OXYS_VIDEO_CARDS/OXYS_DRM_DRIVERS\n' >&2
+    exit 1
+  fi
+
+  local oxys_bin="${OXYS_BIN:-${MONOREPO_ROOT}/target/debug/oxys}"
+  if [[ ! -x "${oxys_bin}" ]]; then
+    cargo build --manifest-path "${MONOREPO_ROOT}/Cargo.toml" -p oxys --bin oxys
+  fi
+  [[ -x "${oxys_bin}" ]] || { printf 'Oxys CLI not found at %s\n' "${oxys_bin}" >&2; exit 1; }
+
+  local policy
+  policy="$("${oxys_bin}" graphics-build-policy "${OXYS_GRAPHICS_MANIFEST}")"
+  eval "${policy}"
+  export OXYS_VIDEO_CARDS OXYS_DRM_DRIVERS
+  printf 'Resolved graphics build policy from %s\n' "${OXYS_GRAPHICS_MANIFEST}"
 }
 
 prepare_output() {
@@ -50,6 +71,12 @@ run_image() {
   fi
   if [[ -n "${OXYS_APPLY_BORE:-}" ]]; then
     env_args+=(--env "OXYS_APPLY_BORE=${OXYS_APPLY_BORE}")
+  fi
+  if [[ -n "${OXYS_VIDEO_CARDS:-}" ]]; then
+    env_args+=(--env "OXYS_VIDEO_CARDS=${OXYS_VIDEO_CARDS}")
+  fi
+  if [[ -n "${OXYS_DRM_DRIVERS:-}" ]]; then
+    env_args+=(--env "OXYS_DRM_DRIVERS=${OXYS_DRM_DRIVERS}")
   fi
 
   podman run \
@@ -86,6 +113,13 @@ Targets:
                   a single profile for one arch, e.g. "v3:kernel" to
                   rebuild just the kernel + zfs-kmod + zfs tarballs the
                   ISO consumes (profiles: kernel, native, generic, pgo)
+
+Graphics policy (space- or comma-separated environment values):
+  OXYS_GRAPHICS_MANIFEST
+                      Generated manifest.toml used to derive both values below
+  OXYS_VIDEO_CARDS    Mesa VIDEO_CARDS build input
+  OXYS_DRM_DRIVERS    Kernel DRM drivers (intel, amdgpu, radeon, nouveau,
+                      virtio_gpu, vmwgfx)
 EOF
 }
 
@@ -158,6 +192,7 @@ main() {
     esac
   done
 
+  resolve_manifest_graphics_policy
   prepare_output
   log "Starting OxysOS Podman package build (targets: ${targets[*]})"
 

@@ -1,7 +1,8 @@
 # OxysOS ISO build
 
-Minimal Gentoo-based, OpenRC, GUI-free bootable ISO with a TUI installer
-(`oxys-installer`) that autostarts on tty1. Built with [catalyst].
+Gentoo-based, OpenRC bootable ISO with a TUI installer (`oxys-installer`) that
+autostarts on tty1 and carries the source image used for desktop installs.
+Built with [catalyst].
 
 ## Layout
 
@@ -55,6 +56,26 @@ Two environment variables control which build gets used:
   the latest. Defaults to the contents of `../oxys-build/output/<arch>/build-id`
   (oxys-build's own "current build" pointer).
 
+Graphics capabilities are build inputs too:
+
+- **`OXYS_GRAPHICS_MANIFEST`** (recommended) points to a compiled, checksummed
+  `manifest.toml`. The build derives both Mesa and DRM inputs from its resolved
+  graphics policy. `scripts/enter-container.sh` performs this resolution on
+  the host before entering the catalyst container.
+- **`OXYS_VIDEO_CARDS`** optionally replaces the Mesa policy (space- or
+  comma-separated). Mesa is excluded from binary-package reuse, rebuilt with
+  this policy, and checked for matching VDB USE flags and driver files.
+- **`OXYS_DRM_DRIVERS`** optionally requires a space- or comma-separated set
+  from the prebuilt kernel (`intel`, `amdgpu`, `radeon`, `nouveau`,
+  `virtio_gpu`, `vmwgfx`). The ISO rejects kernel metadata that does not
+  advertise every requested driver.
+
+Use the same `OXYS_GRAPHICS_MANIFEST` for `oxys-build/podman/build.sh` and
+`oxys-iso/scripts/enter-container.sh build`; supplying it together with either
+explicit graphics variable is an error. The finished image records the actual result in a checksummed
+`/usr/share/oxys/image-capabilities.toml` contract, which the installer
+validates before modifying a target.
+
 `build.sh` fails fast — before catalyst even starts — if no valid, paired
 kernel+zfs-kmod build exists for the requested arch/build-id (see
 `scripts/resolve-kernel-build.sh`), rather than failing deep inside a stage2
@@ -93,7 +114,9 @@ via a plain `livecd/overlay` dir rather than the kernel-injection path.
   line in `/etc/inittab` is rewritten to `agetty --autologin root`, and root's
   `.bash_profile` execs `oxys-installer` on tty1 only. If it exits, agetty
   respawns it (kiosk behavior). tty2–6 keep normal logins for recovery.
-- **GUI-free:** `USE="-X -wayland -gtk -gnome -kde -qt5 -qt6 -gui -fonts"`.
+- **Policy-built desktop stack:** Mesa and kernel capabilities should come from
+  `OXYS_GRAPHICS_MANIFEST`; the fallback Mesa default includes physical
+  Intel/AMD/Nouveau coverage plus Virgl for QEMU.
 
 ## Prerequisites on the binary
 
