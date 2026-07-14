@@ -360,8 +360,8 @@ pub(super) fn draw_config(frame: &mut Frame, area: Rect, app: &App) {
 
     // No options above the focal panel anymore -- selection is only inside the box.
     let descriptions = [
-        ("base.rs", "Minimal system, no desktop environment"),
-        ("desktop.rs", "Windowing system and common applications"),
+        ("desktop.fe2o3", "Windowing system and common applications"),
+        ("base.fe2o3", "Minimal system, no desktop environment"),
         ("custom", "Point to your own config source"),
     ];
 
@@ -411,6 +411,57 @@ pub(super) fn draw_config(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(FAINT),
     )));
     draw_focal_panel(frame, chunks[2], "profiles", ACCENT, body);
+}
+
+pub(super) fn draw_custom_source(frame: &mut Frame, area: Rect, app: &App) {
+    let chunks = screen_chunks(area, 2, 8);
+    frame.render_widget(
+        Paragraph::new(section_header("step 4", "custom config source")),
+        chunks[0],
+    );
+
+    let status = if app.custom_fetching {
+        let spinner = SPINNER[app.hardware_spinner_idx % SPINNER.len()];
+        status_line(spinner, "fetching config".to_string(), ACCENT, true)
+    } else {
+        status_line(
+            "•",
+            "point at a local file path or an http(s) URL".to_string(),
+            ACCENT,
+            true,
+        )
+    };
+    frame.render_widget(Paragraph::new(status), chunks[1]);
+
+    let mut body = vec![
+        Line::from(vec![
+            Span::styled(format!("{:<10}", "source"), Style::default().fg(DIM)),
+            Span::styled(
+                format!("{}█", app.custom_source_input),
+                Style::default().fg(FG),
+            ),
+        ]),
+        Line::from(""),
+    ];
+
+    if let Some(error) = &app.custom_source_error {
+        body.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(WARN),
+        )));
+        body.push(Line::from(""));
+    }
+
+    body.push(Line::from(Span::styled(
+        "Leave blank and press enter to use the built-in custom.fe2o3 template.",
+        Style::default().fg(FAINT),
+    )));
+    body.push(Line::from(Span::styled(
+        "Or type a local path (e.g. /root/my-config.fe2o3) or a URL (https://…) and press enter.",
+        Style::default().fg(FAINT),
+    )));
+
+    draw_focal_panel(frame, chunks[2], "source", ACCENT, body);
 }
 
 pub(super) fn draw_config_validate(frame: &mut Frame, area: Rect, app: &App) {

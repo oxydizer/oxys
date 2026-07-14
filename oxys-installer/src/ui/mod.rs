@@ -19,6 +19,7 @@ use screens::{
     draw_config_error,
     draw_config_validate,
     draw_confirm,
+    draw_custom_source,
     draw_disk_select,
     draw_done,
     draw_hardware_detection,
@@ -59,6 +60,7 @@ pub(crate) fn draw_ui(frame: &mut Frame, app: &App) {
         Screen::DiskSelect => draw_disk_select(frame, body, app),
         Screen::Partition => {} // step 4 (partition) hidden for now
         Screen::ConfigSelect => draw_config(frame, body, app),
+        Screen::CustomSource => draw_custom_source(frame, body, app),
         Screen::ConfigValidate => draw_config_validate(frame, body, app),
         Screen::ConfigError => draw_config_error(frame, body, app),
         Screen::PackageSummary => draw_package_summary(frame, body, app),

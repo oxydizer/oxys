@@ -3,7 +3,7 @@ use oxys::prelude::*;
 pub fn config() -> Oxys {
     Oxys {
         os: Os {
-            hostname: "oxys".into(),
+            hostname: "OxysOS".into(),
             timezone: "Europe/London".into(),
             locale: "en_US.UTF-8".into(),
             shell: Shell::Bash,

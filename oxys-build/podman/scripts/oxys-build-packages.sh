@@ -190,7 +190,8 @@ EMERGE_DEFAULT_OPTS="--ask=n --verbose --keep-going=y --with-bdeps=y --jobs=1 --
 PKGDIR="/var/cache/binpkgs"
 PORTAGE_BINHOST_HEADER_URI=""
 ${binhost_line}
-VIDEO_CARDS="intel nouveau radeon radeonsi amdgpu"
+# Keep QEMU's virtio/virgl renderer in the reusable desktop package set.
+VIDEO_CARDS="intel radeon radeonsi amdgpu virgl"
 INPUT_DEVICES="libinput"
 LLVM_TARGETS="X86 AMDGPU"
 KERNEL="manual"
@@ -503,11 +504,14 @@ assert_boot_critical_kernel_config() {
   local missing=() opt
   for opt in OVERLAY_FS SQUASHFS BLK_DEV_LOOP ISO9660_FS BLK_DEV_DM \
              SCSI BLK_DEV_SD BLK_DEV_SR SATA_AHCI BLK_DEV_NVME USB_STORAGE \
-             VFAT_FS EFI EFI_STUB; do
+             VFAT_FS EFI EFI_STUB INPUT_EVDEV VIRTIO_INPUT \
+             VIRTIO_NET E1000E IGB IGC R8169 TIGON3 BNX2 ALX \
+             USB_USBNET USB_NET_CDCETHER USB_RTL8152 \
+             SERIAL_8250 SERIAL_8250_CONSOLE NET_9P NET_9P_VIRTIO 9P_FS; do
     grep -qE "^CONFIG_${opt}=[ym]$" "${config}" || missing+=("CONFIG_${opt}")
   done
   if (( ${#missing[@]} > 0 )); then
-    log "Boot-critical kernel options missing after olddefconfig: ${missing[*]}"
+    log "Required boot/live-hardware kernel options missing after olddefconfig: ${missing[*]}"
     log "Check kernel/base.config (and its Kconfig dependencies) against this kernel version."
     exit 1
   fi
@@ -522,6 +526,13 @@ prepare_kernel_tree() {
   fi
 
   ln -sfn "${source_dir}" /usr/src/linux
+  # gentoo-sources sets EXTRAVERSION=-gentoo in its top-level Makefile. Keep
+  # the patched source package, but expose the built kernel as <version>-oxys.
+  sed -i -E 's/^(EXTRAVERSION[[:space:]]*=).*/\1/' "${source_dir}/Makefile"
+  if grep -qE '^EXTRAVERSION[[:space:]]*=[[:space:]]*.+$' "${source_dir}/Makefile"; then
+    log "Failed to clear the gentoo-sources EXTRAVERSION"
+    exit 1
+  fi
   apply_bore_patch "${source_dir}"
   merge_kernel_config "${source_dir}"
   make -C /usr/src/linux olddefconfig prepare modules_prepare 2>&1 | tee -a "${CONTAINER_LOG}"

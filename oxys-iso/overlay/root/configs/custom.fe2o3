@@ -3,7 +3,7 @@ use oxys::prelude::*;
 pub fn config() -> Oxys {
     Oxys {
         os: Os {
-            hostname: "oxys".into(),
+            hostname: "OxysOS".into(),
             timezone: "Europe/London".into(),
             locale: "en_US.UTF-8".into(),
             shell: Shell::Bash,
@@ -25,7 +25,12 @@ pub fn config() -> Oxys {
                 .binary(true)
                 .keywords(["**"]),
             Package::new("www-client/firefox-bin"),
-            Package::new("media-video/pipewire"),
+            Package::new("media-video/pipewire")
+                .use_flags(vec!["sound-server", "pipewire-alsa"]),
+            Package::new("media-libs/mesa").use_flags(vec!["video_cards_virgl"]),
+            // Required by the enabled OpenRC service; USE=server installs the
+            // daemon and /etc/init.d/seatd rather than libseat alone.
+            Package::new("sys-auth/seatd").use_flags(vec!["server"]),
         ],
         services: oxys::services! {
             enabled: ["dbus", "seatd", "NetworkManager", "sshd"],

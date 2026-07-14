@@ -34,9 +34,9 @@ cargo build \
 
 install -D -m 0755 "${BIN}" "${OVERLAY_BIN}"
 install -d -m 0755 "${OVERLAY_CONFIG_DIR}"
-install -m 0644 "${INSTALLER_DIR}/configs/base.rs" "${OVERLAY_CONFIG_DIR}/base.rs"
-install -m 0644 "${INSTALLER_DIR}/configs/desktop.rs" "${OVERLAY_CONFIG_DIR}/desktop.rs"
-install -m 0644 "${INSTALLER_DIR}/configs/custom.rs" "${OVERLAY_CONFIG_DIR}/custom.rs"
+install -m 0644 "${INSTALLER_DIR}/configs/base.fe2o3" "${OVERLAY_CONFIG_DIR}/base.fe2o3"
+install -m 0644 "${INSTALLER_DIR}/configs/desktop.fe2o3" "${OVERLAY_CONFIG_DIR}/desktop.fe2o3"
+install -m 0644 "${INSTALLER_DIR}/configs/custom.fe2o3" "${OVERLAY_CONFIG_DIR}/custom.fe2o3"
 echo ">> refreshed ISO installer overlay: ${OVERLAY_BIN}"
 echo ">> refreshed ISO config overlay: ${OVERLAY_CONFIG_DIR}"
 
@@ -83,7 +83,7 @@ CARGOCFG
 
 echo ">> staged /usr/src/oxys (+vendor) and /root/.cargo/config.toml"
 
-# --- oxys-login: graphical console login (PAM auth -> niri-session) ----------
+# --- oxys-login: graphical console login (PAM auth -> niri --session) --------
 # Prebuilt here and dropped into the overlay exactly like the installer, so the
 # ISO ships a ready-to-run binary (the installer rsyncs it onto the target where
 # SetupLogin points tty1 at /usr/local/bin/oxys-login). Unlike the installer it

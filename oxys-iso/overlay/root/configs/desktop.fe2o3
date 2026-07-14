@@ -3,7 +3,7 @@ use oxys::prelude::*;
 pub fn config() -> Oxys {
     Oxys {
         os: Os {
-            hostname: "oxys".into(),
+            hostname: "OxysOS".into(),
             timezone: "Europe/London".into(),
             locale: "en_US.UTF-8".into(),
             shell: Shell::Bash,
@@ -47,10 +47,15 @@ pub fn config() -> Oxys {
             Package::new("gui-wm/niri").use_flags(vec!["screencast"]).keywords(["**"]),
             Package::new("gui-shells/noctalia").keywords(["**"]),
             // audio/video + session manager:
-            Package::new("media-video/pipewire"),
+            Package::new("media-video/pipewire")
+                .use_flags(vec!["sound-server", "pipewire-alsa"]),
             Package::new("media-video/wireplumber"),
+            // Keep QEMU's virgl renderer across target updates. Virtio is not
+            // a physical GPU vendor, so detect_gpu() cannot infer this flag.
+            Package::new("media-libs/mesa").use_flags(vec!["video_cards_virgl"]),
             // session plumbing:
-            Package::new("sys-auth/seatd"),
+            // Gentoo gates the daemon + OpenRC init script behind USE=server.
+            Package::new("sys-auth/seatd").use_flags(vec!["server"]),
             Package::new("sys-auth/polkit"),
             Package::new("app-crypt/p11-kit"),
             Package::new("sys-apps/xdg-desktop-portal"),
@@ -79,6 +84,9 @@ pub fn config() -> Oxys {
             disabled: ["lvm2-monitor", "multipathd"],
         },
         users: vec![User::prompt()
+            // Direct tty/seatd sessions need the seat socket plus access to
+            // DRM, input, and audio devices without a systemd user manager.
+            .groups(["video", "input", "audio", "seat"])
             .wheel()
             .shell(Shell::Bash)
             .password(Password::Prompt)],

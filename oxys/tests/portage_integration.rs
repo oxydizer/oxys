@@ -539,6 +539,7 @@ fn from_source_with_use_flags_and_global_prefer_binary_resolves_to_source_and_ap
         std::path::Path::new("/"),
         1,
         plan.use_binpkgs,
+        true,
     );
     assert!(!argv.contains(&"--getbinpkg".to_string()));
     assert!(!argv.contains(&"--usepkg".to_string()));
@@ -632,6 +633,7 @@ fn no_from_source_no_use_flags_global_prefer_binary_resolves_binary_happy_path(
         std::path::Path::new("/"),
         2,
         plan.use_binpkgs,
+        true,
     );
     assert!(argv.contains(&"--getbinpkg".to_string()));
     assert!(argv.contains(&"--usepkg".to_string()));
@@ -714,6 +716,7 @@ fn from_source_no_use_flags_resolves_to_source_with_defaults_no_error(
         std::path::Path::new("/"),
         1,
         plan.use_binpkgs,
+        true,
     );
     assert!(!argv.contains(&"--getbinpkg".to_string()));
 

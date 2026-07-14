@@ -5,19 +5,19 @@ use std::{
     process::{Command, Stdio},
 };
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use colored::Colorize;
 use oxys::{
-    parse_generated_manifest_toml,
+    SystemManifest, parse_generated_manifest_toml,
     use_resolver::{
-        build_world_update_plan, parse_pretend_world_update, plan_update_preflight, PortagePlan,
-        PretendOperation, PretendPackage, PretendPackageSource, WorldUpdatePlan,
-        WorldUpdateWarning,
+        PretendOperation, PretendPackageSource, WorldUpdatePlan, WorldUpdateWarning,
+        build_world_update_plan, parse_pretend_world_update, plan_update_preflight,
     },
     util::default_use_resolver_cache_dir,
-    SystemManifest,
 };
-use serde::Serialize;
+
+use super::output::{fail_on_conflicts, print_plan};
+use super::update_report::write_update_report;
 
 const DEFAULT_PORTAGE_TREE: &str = "/var/db/repos";
 const SYSTEM_MANIFEST: &str = "/etc/oxys/current-manifest.toml";
@@ -130,7 +130,7 @@ pub(crate) fn run(
         &effective_portage_tree(),
         &default_use_resolver_cache_dir(),
     )?;
-    crate::print_plan(&plan);
+    print_plan(&plan);
     if !plan.resolution.conflicts.is_empty() {
         write_update_report(
             None,
@@ -141,7 +141,7 @@ pub(crate) fn run(
             Some(&plan),
             "blocked_by_conflicts",
         );
-        crate::fail_on_conflicts(&plan)?;
+        fail_on_conflicts(&plan)?;
     }
 
     if dry_run {
@@ -294,181 +294,6 @@ fn print_world_update_plan(plan: &WorldUpdatePlan) {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct UpdateReport {
-    started_at: String,
-    sync_ran: bool,
-    dry_run: bool,
-    force: bool,
-    real_update_status: String,
-    parsed_packages: Vec<UpdateReportPackage>,
-    wrapper_warnings: Vec<UpdateReportWarning>,
-    resolver_warnings: Vec<UpdateReportResolverWarning>,
-    resolver_conflicts: Vec<UpdateReportConflict>,
-}
-#[derive(Debug, Serialize)]
-struct UpdateReportPackage {
-    package: String,
-    version: String,
-    source: String,
-    operation: String,
-}
-#[derive(Debug, Serialize)]
-struct UpdateReportWarning {
-    kind: String,
-    package: String,
-}
-#[derive(Debug, Serialize)]
-struct UpdateReportResolverWarning {
-    package: String,
-    message: String,
-}
-#[derive(Debug, Serialize)]
-struct UpdateReportConflict {
-    packages: Vec<String>,
-    flag: String,
-    reason: String,
-}
-
-/// Writes (or rewrites) the update report. When `existing_path` is set, that
-/// file is updated in place so a real merge can record preflight state before
-/// emerge starts and the final status after it exits.
-fn write_update_report(
-    existing_path: Option<&Path>,
-    started_at: DateTime<Utc>,
-    dry_run: bool,
-    force: bool,
-    update_plan: &WorldUpdatePlan,
-    preflight_plan: Option<&PortagePlan>,
-    real_update_status: &str,
-) -> Option<PathBuf> {
-    let Some(report_dir) = update_report_dir() else {
-        return None;
-    };
-    let report = UpdateReport {
-        started_at: started_at.to_rfc3339(),
-        sync_ran: update_plan.sync_ran,
-        dry_run,
-        force,
-        real_update_status: real_update_status.to_owned(),
-        parsed_packages: update_plan.packages.iter().map(report_package).collect(),
-        wrapper_warnings: update_plan
-            .warnings
-            .iter()
-            .map(report_wrapper_warning)
-            .collect(),
-        resolver_warnings: preflight_plan
-            .map(|plan| {
-                plan.resolution
-                    .warnings
-                    .iter()
-                    .map(|warning| UpdateReportResolverWarning {
-                        package: warning.package.clone(),
-                        message: warning.message.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-        resolver_conflicts: preflight_plan
-            .map(|plan| {
-                plan.resolution
-                    .conflicts
-                    .iter()
-                    .map(|conflict| UpdateReportConflict {
-                        packages: conflict.packages.clone(),
-                        flag: conflict.flag.clone(),
-                        reason: conflict.reason.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
-    };
-    if let Err(err) = fs::create_dir_all(&report_dir) {
-        eprintln!(
-            "{} failed to create update report directory {}: {}",
-            "warning:".yellow().bold(),
-            report_dir.display(),
-            err
-        );
-        return None;
-    }
-    let path = existing_path.map(Path::to_path_buf).unwrap_or_else(|| {
-        report_dir.join(format!(
-            "update-{}.toml",
-            started_at.format("%Y%m%d-%H%M%S")
-        ))
-    });
-    let rendered = match toml::to_string_pretty(&report) {
-        Ok(rendered) => rendered,
-        Err(err) => {
-            eprintln!(
-                "{} failed to render update report: {}",
-                "warning:".yellow().bold(),
-                err
-            );
-            return None;
-        }
-    };
-    if let Err(err) = fs::write(&path, rendered) {
-        eprintln!(
-            "{} failed to write update report {}: {}",
-            "warning:".yellow().bold(),
-            path.display(),
-            err
-        );
-        return None;
-    }
-    println!(
-        "{} {}",
-        if existing_path.is_some() {
-            "Updated update report:"
-        } else {
-            "Saved update report:"
-        }
-        .green()
-        .bold(),
-        path.display().to_string().green()
-    );
-    Some(path)
-}
-
-fn update_report_dir() -> Option<PathBuf> {
-    std::env::var_os("OXYS_UPDATE_LOG_DIR")
-        .map(PathBuf::from)
-        .and_then(|path| (!path.as_os_str().is_empty()).then_some(path))
-        .or_else(|| Some(PathBuf::from("/var/log/oxys")))
-}
-
-fn report_package(package: &PretendPackage) -> UpdateReportPackage {
-    UpdateReportPackage {
-        package: package.package.clone(),
-        version: package.version.clone(),
-        source: match package.source {
-            PretendPackageSource::Ebuild => "ebuild",
-            PretendPackageSource::Binary => "binary",
-        }
-        .to_owned(),
-        operation: match package.operation {
-            PretendOperation::Merge => "merge",
-            PretendOperation::Uninstall => "uninstall",
-        }
-        .to_owned(),
-    }
-}
-
-fn report_wrapper_warning(warning: &WorldUpdateWarning) -> UpdateReportWarning {
-    match warning {
-        WorldUpdateWarning::NotInManifest { package } => UpdateReportWarning {
-            kind: "not_in_manifest".to_owned(),
-            package: package.clone(),
-        },
-        WorldUpdateWarning::RemovedByUpdate { package } => UpdateReportWarning {
-            kind: "removed_by_update".to_owned(),
-            package: package.clone(),
-        },
-    }
-}
-
 fn effective_portage_tree() -> PathBuf {
     std::env::var_os("OXYS_PORTAGE_TREE")
         .map(PathBuf::from)
@@ -500,7 +325,12 @@ fn run_emerge_passthrough(args: &[String]) -> Result<()> {
 fn run_emerge_capture(args: &[String]) -> Result<String> {
     let output = Command::new(emerge_binary()).args(args).output()?;
     if !output.status.success() {
-        crate::print_command_output(&output.stdout, &output.stderr);
+        if !output.stdout.is_empty() {
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+        if !output.stderr.is_empty() {
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        }
         return Err(io::Error::other(format!(
             "emerge {} failed: {}",
             args.join(" "),

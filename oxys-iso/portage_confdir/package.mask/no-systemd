@@ -1,0 +1,20 @@
+# Hard-mask full systemd so it can NEVER be silently pulled in as PID 1.
+#
+# OxysOS is OpenRC-only. USE="-systemd elogind" (make.conf + livecd/use) stops
+# packages from *enabling* their systemd integration, but it does NOT stop a
+# package from pulling sys-apps/systemd through an unconditional dependency or a
+# `|| ( sys-apps/systemd sys-apps/systemd-utils[...] )` any-of block. When that
+# happens systemd merges, seizes /sbin/init, and the ISO (and every target
+# rsync'd from it) boots systemd instead of OpenRC -- exactly the "still picked
+# up systemd" symptom, with no obvious cause in the USE flags.
+#
+# Masking sys-apps/systemd converts that silent capture into a BUILD FAILURE that
+# names the offending package ("masked by: package.mask ... required by <pkg>"),
+# so the real puller is visible instead of shipping in the image. udev/tmpfiles
+# come from sys-apps/systemd-utils (left unmasked), which never provides the PID 1
+# manager binary. If the failure points at a `[...kernel-install]`-style any-of,
+# enable that flag on systemd-utils rather than unmasking systemd.
+#
+# To temporarily allow a systemd build (e.g. init_system: Systemd), delete this
+# file.
+sys-apps/systemd

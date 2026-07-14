@@ -13,9 +13,24 @@
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
+# Fail-fast self syntax-check. bash parses a directly-invoked script lazily
+# (command by command), so a syntax error further down doesn't surface until
+# execution reaches it -- which once meant a broken line 373 only erroring
+# ~30min into livecd-stage1. Re-parse the whole file up front so any such error
+# aborts in ~1s here instead. (`$0` is this script; `|| exit` keeps the message.)
+bash -n "${BASH_SOURCE[0]}" || { echo "build.sh: syntax check failed, aborting" >&2; exit 2; }
+
+# The monorepo is bind-mounted into this rootful container with host ownership
+# (uid 1000), but build.sh runs as root (uid 0). Git 2.35.2+ refuses to operate
+# on the prefetched bare repos under .build/source-cache/git3-src/ because the
+# owner differs from the caller ("detected dubious ownership"). Trust every path
+# system-wide so it applies regardless of HOME and covers all preseeded repos.
+git config --system --add safe.directory '*'
+
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${REPO_DIR}/.build"
 SPECS_SRC="${REPO_DIR}/specs"
+GIT_SOURCES_FILE="${REPO_DIR}/git-sources.conf"
 
 # Monorepo root (oxys-iso's parent dir). oxys-build's tagged kernel/zfs-kmod
 # output lives at ${MONOREPO_ROOT}/oxys-build/output/<arch>/ — see
@@ -95,9 +110,9 @@ fi
 # runs from Rust-capable chroots/containers; a minimal catalyst image may not
 # have cargo installed.
 install -d -m 0755 "${OVERLAY_CONFIG_DIR}"
-install -m 0644 "${INSTALLER_CONFIG_DIR}/base.rs" "${OVERLAY_CONFIG_DIR}/base.rs"
-install -m 0644 "${INSTALLER_CONFIG_DIR}/desktop.rs" "${OVERLAY_CONFIG_DIR}/desktop.rs"
-install -m 0644 "${INSTALLER_CONFIG_DIR}/custom.rs" "${OVERLAY_CONFIG_DIR}/custom.rs"
+install -m 0644 "${INSTALLER_CONFIG_DIR}/base.fe2o3" "${OVERLAY_CONFIG_DIR}/base.fe2o3"
+install -m 0644 "${INSTALLER_CONFIG_DIR}/desktop.fe2o3" "${OVERLAY_CONFIG_DIR}/desktop.fe2o3"
+install -m 0644 "${INSTALLER_CONFIG_DIR}/custom.fe2o3" "${OVERLAY_CONFIG_DIR}/custom.fe2o3"
 echo ">> refreshed ISO config overlay: ${OVERLAY_CONFIG_DIR}"
 
 # Only rebuild if this environment's Rust can actually target musl. The host
@@ -159,6 +174,65 @@ echo ">> using prebuilt kernel ${OXYS_RESOLVED_KERNEL_RELEASE} (arch=${OXYS_RESO
 # agree regardless of this container's actual config.
 DISTDIR="${OXYS_DISTDIR:-$(portageq envvar DISTDIR)}"
 [[ -n "${DISTDIR}" ]] || { echo "ERROR: 'portageq envvar DISTDIR' returned nothing usable; set OXYS_DISTDIR explicitly." >&2; exit 1; }
+
+# Build an isolated Portage config for this catalyst run. The static config is
+# copied verbatim, then package.env entries for every prefetched live Git source
+# are generated from the same manifest used by the host prefetcher.
+GENERATED_PORTAGE_CONFDIR="${WORK}/portage_confdir"
+GIT_OFFLINE_ENV="prefetched-git-source.conf"
+mkdir -p "${WORK}"
+rm -rf "${GENERATED_PORTAGE_CONFDIR}"
+cp -a "${REPO_DIR}/portage_confdir" "${GENERATED_PORTAGE_CONFDIR}"
+mkdir -p "${GENERATED_PORTAGE_CONFDIR}/package.env"
+GENERATED_GIT_PACKAGE_ENV="${GENERATED_PORTAGE_CONFDIR}/package.env/prefetched-git-sources"
+: > "${GENERATED_GIT_PACKAGE_ENV}"
+if [[ ! -f "${GENERATED_PORTAGE_CONFDIR}/env/${GIT_OFFLINE_ENV}" ]]; then
+	echo "ERROR: missing Portage environment file: env/${GIT_OFFLINE_ENV}" >&2
+	exit 1
+fi
+
+declare -A offline_git_atoms=()
+git_source_count=0
+if ! git_source_rows="$("${REPO_DIR}/scripts/prefetch-git-sources.sh" \
+	--list "${GIT_SOURCES_FILE}")"; then
+	echo "ERROR: invalid Git source manifest: ${GIT_SOURCES_FILE}" >&2
+	exit 1
+fi
+
+while IFS=$'\t' read -r package_atom store_name _source_uri _source_ref; do
+	cache_repo="${WORK}/source-cache/git3-src/${store_name}"
+	git3_repo="${DISTDIR}/git3-src/${store_name}"
+	if ! git --git-dir="${cache_repo}" \
+		cat-file -e 'refs/heads/oxys-source^{commit}' 2>/dev/null; then
+		echo "ERROR: prefetched Git source is missing or incomplete for ${package_atom}:" >&2
+		echo "       ${cache_repo}" >&2
+		echo "       Run scripts/enter-container.sh build from the host; it prefetches" >&2
+		echo "       every entry in ${GIT_SOURCES_FILE}." >&2
+		exit 1
+	fi
+
+	mkdir -p "$(dirname "${git3_repo}")"
+	rm -rf "${git3_repo}"
+	git clone --bare --no-hardlinks "${cache_repo}" "${git3_repo}" >/dev/null
+	# git-r3 runs src_unpack as Portage's build user. The preseeded clone must
+	# be writable so it can create package-local refs before checking out source.
+	chown -R portage:portage "${git3_repo}"
+	commit="$(git --git-dir="${git3_repo}" rev-parse 'refs/heads/oxys-source^{commit}')"
+	echo ">> staged offline Git source for ${package_atom} at ${git3_repo} (${commit:0:12})"
+
+	if [[ -z "${offline_git_atoms[$package_atom]:-}" ]]; then
+		printf '%s %s\n' "${package_atom}" "${GIT_OFFLINE_ENV}" >> "${GENERATED_GIT_PACKAGE_ENV}"
+		offline_git_atoms["${package_atom}"]=1
+	fi
+	((git_source_count += 1))
+done <<< "${git_source_rows}"
+
+if (( git_source_count == 0 )); then
+	echo "ERROR: no Git sources configured in ${GIT_SOURCES_FILE}." >&2
+	exit 1
+fi
+echo ">> staged ${git_source_count} offline Git source(s) for catalyst"
+
 KERNEL_CACHE_DIR="${DISTDIR}/oxys-kernel-cache"
 mkdir -p "${KERNEL_CACHE_DIR}"
 rm -f "${KERNEL_CACHE_DIR}"/*.tar.gz "${KERNEL_CACHE_DIR}"/*.metadata "${KERNEL_CACHE_DIR}/manifest.env"
@@ -205,6 +279,24 @@ tar -C "${ZFS_OVERLAY}" --keep-directory-symlink -xzf "${OXYS_ZFS_USERLAND_TARBA
 rm "${ZFS_OVERLAY}"/{bin,sbin,lib,lib64} "${ZFS_OVERLAY}/usr/sbin"
 echo ">> staged zfs userland overlay at ${ZFS_OVERLAY}"
 
+# --- stage a root-owned copy of the committed overlay -----------------------
+# overlay/ lives in the git checkout owned by the invoking user (uid 1000), but
+# catalyst applies livecd/root_overlay with plain `rsync -a`, which preserves
+# source ownership. Shipping overlay/ directly therefore stamps uid 1000 onto
+# every path it carries -- including /var, since the overlay ships
+# var/db/repos/guru. On the live ISO that leaves /var owned by uid 1000 while
+# /var/tmp (from the stage3, not in the overlay) stays root:root. The installer
+# then rsyncs the live root to the target with --numeric-ids, so the target
+# inherits the same split and the first real user (uid 1000) appears to own
+# /var -- tripping systemd's "unsafe path transition /var -> /var/tmp" check.
+# Copy to a scratch dir and normalise to root:root; build.sh runs as root inside
+# the catalyst container, so the baked overlay then carries correct ownership.
+OVERLAY_DIR="${WORK}/root-overlay"
+rm -rf "${OVERLAY_DIR}"
+cp -a "${REPO_DIR}/overlay" "${OVERLAY_DIR}"
+chown -R 0:0 "${OVERLAY_DIR}"
+echo ">> staged root-owned overlay at ${OVERLAY_DIR}"
+
 # --- render specs from templates --------------------------------------------
 mkdir -p "${WORK}"
 render() {
@@ -213,11 +305,41 @@ render() {
 	    -e "s|@DATESTAMP@|${DATESTAMP}|g" \
 	    -e "s|@TREEISH@|${TREEISH}|g" \
 	    -e "s|@REPO_DIR@|${REPO_DIR}|g" \
+	    -e "s|@OVERLAY_DIR@|${OVERLAY_DIR}|g" \
+	    -e "s|@PORTAGE_CONFDIR@|${GENERATED_PORTAGE_CONFDIR}|g" \
 	    -e "s|@ZFS_OVERLAY@|${ZFS_OVERLAY}|g" \
 	    "${in}" > "${out}"
 }
 render "${SPECS_SRC}/installcd-stage1.spec" "${WORK}/stage1.spec"
 render "${SPECS_SRC}/installcd-stage2.spec" "${WORK}/stage2.spec"
+
+# --- fail-fast overrides (iteration only) -----------------------------------
+# OXYS_STAGE1_PACKAGES="cat/pkg ..."  Replace the whole livecd/packages list
+#   with just these atoms, so a single package (plus the deps Portage pulls for
+#   it) builds instead of the full ~50-package live set. Lets a live/git-sourced
+#   package like gui-shells/noctalia surface build errors in minutes rather than
+#   after everything else emerges first. Combine with OXYS_STAGE1_ONLY=1.
+# OXYS_STAGE1_ONLY=1  Stop after livecd-stage1; skip the kernel/squashfs/ISO
+#   stage2. The result is not a bootable ISO -- it's a compile smoke-test.
+if [[ -n "${OXYS_STAGE1_PACKAGES:-}" ]]; then
+	# Rewrite the livecd/packages: block in the rendered spec. The value block
+	# is the key line plus every following whitespace-indented (atom/comment)
+	# line; it ends at the next column-0 line (the next spec key or comment).
+	awk -v pkgs="${OXYS_STAGE1_PACKAGES}" '
+		/^livecd\/packages:/ {
+			print
+			n = split(pkgs, a, /[[:space:],]+/)
+			for (i = 1; i <= n; i++) if (a[i] != "") printf "\t%s\n", a[i]
+			skip = 1
+			next
+		}
+		skip && /^[ \t]/ { next }        # continuation line: drop
+		skip && /^[ \t]*$/ { next }      # blank line inside block: drop
+		{ skip = 0; print }
+	' "${WORK}/stage1.spec" > "${WORK}/stage1.spec.tmp"
+	mv "${WORK}/stage1.spec.tmp" "${WORK}/stage1.spec"
+	echo ">> OXYS_STAGE1_PACKAGES set: stage1 will build only: ${OXYS_STAGE1_PACKAGES}"
+fi
 
 echo ">> OxysOS build ${TIMESTAMP} (treeish=${TREEISH})"
 
@@ -267,11 +389,47 @@ if compgen -G "${BUILDS_DIR}/oxysos-*.iso" >/dev/null 2>&1; then
 	      "${BUILDS_DIR}"/oxysos-*.iso.sha256
 fi
 
+# --- prune accumulated per-run scratch (disk hygiene) -----------------------
+# catalyst never cleans up after itself: every run leaves behind a full chroot
+# under tmp/<rel>/, a leftover squashfs staging dir + a stage tarball under
+# builds/<rel>/, and an .autoresume-* marker -- each 1-6 GB. Because build.sh
+# stamps a fresh TIMESTAMP every run, NONE of these timestamped artifacts is
+# ever reused; left alone they had grown to >150 GB here. The genuine cross-run
+# caches -- packages/ (binpkgs), distfiles/, kerncache/, snapshots/ -- live in
+# sibling directories and are deliberately NOT touched, so this doesn't force a
+# from-scratch rebuild. We keep only the single newest livecd-stage1 tarball (so
+# stage2 can be hand-re-run against it) and the ISO we're about to replace.
+# Runs before catalyst starts, so the current run's own dirs don't exist yet.
+# Set OXYS_NO_PRUNE=1 to skip.
+if [[ "${OXYS_NO_PRUNE:-}" != "1" ]]; then
+	before_kb="$(df -Pk "${STOREDIR}" | awk 'NR==2{print $4}')"
+	tmpd="${STOREDIR}/tmp/23.0-default"
+	# Pure scratch: per-run chroots + their autoresume markers. None survives.
+	rm -rf "${tmpd}"/*/ "${tmpd}"/.autoresume-* 2>/dev/null || true
+	# Leftover per-run squashfs staging dirs (image.squashfs is already in the ISO).
+	rm -rf "${BUILDS_DIR}"/livecd-stage2-amd64-*/ 2>/dev/null || true
+	# Stage tarballs: keep the newest livecd-stage1 tarball, drop the rest and
+	# every stage2 tarball (its final output is captured as the ISO).
+	keep_stage1="$(ls -1t "${BUILDS_DIR}"/livecd-stage1-amd64-*.tar.xz 2>/dev/null | head -1 || true)"
+	for f in "${BUILDS_DIR}"/livecd-stage1-amd64-*.tar.xz "${BUILDS_DIR}"/livecd-stage2-amd64-*.tar.bz2; do
+		[[ -e "${f}" ]] || continue                 # unmatched glob -> skip
+		[[ "${f}" == "${keep_stage1}" ]] && continue
+		rm -f "${f}" "${f}.CONTENTS.gz" "${f}.DIGESTS"
+	done
+	after_kb="$(df -Pk "${STOREDIR}" | awk 'NR==2{print $4}')"
+	echo ">> pruned catalyst scratch; reclaimed ~$(awk -v a="${before_kb}" -v b="${after_kb}" \
+		'BEGIN{printf "%.1f", (b-a)/1048576}') GB (free now: $(df -Ph "${STOREDIR}" | awk 'NR==2{print $4}'), set OXYS_NO_PRUNE=1 to skip)"
+fi
+
 # --- stage 1: build the live package set ------------------------------------
 echo ">> livecd-stage1"
 catalyst -af "${WORK}/stage1.spec"
 
 # --- stage 2: kernel + initramfs + overlay + squashfs + ISO -----------------
+if [[ "${OXYS_STAGE1_ONLY:-}" == "1" ]]; then
+	echo ">> OXYS_STAGE1_ONLY=1: stopping after livecd-stage1 (no ISO produced)."
+	exit 0
+fi
 echo ">> livecd-stage2"
 catalyst -af "${WORK}/stage2.spec"
 

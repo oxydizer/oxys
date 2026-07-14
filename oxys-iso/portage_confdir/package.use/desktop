@@ -1,6 +1,23 @@
 # niri: screen-capture support (pipewire-backed screencast portal path). Matches
-# oxys-installer/configs/desktop.rs, which sets the screencast use flag on niri.
+# oxys-installer/configs/desktop.fe2o3, which sets the screencast use flag on niri.
 gui-wm/niri screencast
+
+# Niri in QEMU needs Mesa's virgl Gallium driver. Keep this package-local even
+# though make.conf also lists virgl in VIDEO_CARDS: catalyst accepted an
+# official Mesa binpkg without video_cards_virgl, leaving /dev/dri present but
+# no virtio_gpu_dri.so renderer in the finished ISO.
+media-libs/mesa video_cards_virgl
+
+# The Gentoo seatd ebuild installs only libseat by default. The standalone
+# daemon and /etc/init.d/seatd are gated behind USE=server; the desktop config
+# enables that OpenRC service, so it must be present in the live root that is
+# rsync'd to the installed system.
+sys-auth/seatd server
+
+# OpenRC sessions launch PipeWire through gentoo-pipewire-launcher. Make it the
+# complete desktop audio server: pipewire-pulse serves PulseAudio applications,
+# while pipewire-alsa routes native ALSA applications into the same graph.
+media-video/pipewire sound-server pipewire-alsa
 
 # freetype<->harfbuzz have a circular dependency, so the profile leaves freetype
 # built without harfbuzz by default. pango (via pangomm -> gtkmm -> pavucontrol)

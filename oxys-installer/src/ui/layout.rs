@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::app::{App, Screen};
 
-use super::theme::{ACCENT, ACCENT_DIM, BG, DIM, FAINT, FG};
+use super::theme::{ACCENT, ACCENT_DIM, ASCII_SPINNER, BG, DIM, FAINT, FG, SUCCESS};
 
 pub(super) fn centered_container(area: Rect, fixed_width: u16) -> Rect {
     let width = fixed_width.min(area.width.saturating_sub(2).max(40));
@@ -40,8 +40,14 @@ pub(super) fn pad(area: Rect, h: u16, v: u16) -> Rect {
 pub(super) fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(30), Constraint::Min(10)])
+        .constraints([Constraint::Length(38), Constraint::Min(10)])
         .split(area);
+
+    let (status_label, status_color) = match app.network_online {
+        Some(true) => ("online", SUCCESS),
+        Some(false) => ("offline", DIM),
+        None => (ASCII_SPINNER[app.network_spinner_idx], DIM),
+    };
 
     let title = Line::from(vec![
         Span::styled("OXYS", Style::default().fg(FG).add_modifier(Modifier::BOLD)),
@@ -51,6 +57,8 @@ pub(super) fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
         ),
         Span::styled(" v0.1 installer", Style::default().fg(DIM)),
+        Span::styled(" · ", Style::default().fg(FAINT)),
+        Span::styled(status_label, Style::default().fg(status_color)),
     ]);
 
     frame.render_widget(
@@ -147,6 +155,12 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             ("↑↓", "select"),
             ("enter", "compile"),
             ("^G", "edit"),
+            ("esc", "back"),
+        ],
+        Screen::CustomSource if app.custom_fetching => vec![("wait", "fetching")],
+        Screen::CustomSource => vec![
+            ("type", "path or URL"),
+            ("enter", "confirm"),
             ("esc", "back"),
         ],
         Screen::ConfigValidate => vec![("wait", "compiling"), ("esc", "cancel")],

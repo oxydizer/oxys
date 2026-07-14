@@ -1,8 +1,14 @@
 use std::{path::Path, process::Command};
 
-use crate::exec::ProcessStream;
+use crate::exec::{self, ProcessStream};
 
 use super::{util::strip_version_suffix, UseResolverError};
+
+/// Resolves the `emerge` binary to invoke, honoring `OXYS_EMERGE` so tests can
+/// substitute a fake `emerge` script instead of touching a real Portage tree.
+fn emerge_binary() -> String {
+    std::env::var("OXYS_EMERGE").unwrap_or_else(|_| "emerge".to_owned())
+}
 
 /// Structured line events emitted while streaming `emerge` output.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,13 +50,17 @@ pub fn run_emerge(
     portage_tmpdir: &Path,
     jobs: usize,
     use_binpkgs: bool,
+    oneshot: bool,
 ) -> Result<EmergeStream, UseResolverError> {
-    let mut command = Command::new("emerge");
+    let mut command = Command::new(emerge_binary());
     command
         .arg("--root")
         .arg(root)
         .arg("--jobs")
         .arg(jobs.to_string());
+    if oneshot {
+        command.arg("--oneshot");
+    }
     if use_binpkgs {
         command.arg("--getbinpkg").arg("--usepkg");
     }
@@ -93,6 +103,78 @@ pub fn run_emerge_chroot(
         parser_state: ParserState::default(),
         exhausted: false,
     })
+}
+
+/// Records already-installed packages in the Portage world set without rebuilding them.
+/// No-op when `atoms` is empty.
+pub fn emerge_select(atoms: &[String], root: &Path) -> Result<String, UseResolverError> {
+    if atoms.is_empty() {
+        return Ok(String::new());
+    }
+    run_world_command(&["--noreplace", "--select"], atoms, root)
+}
+
+/// Removes packages from the Portage world set. No-op when `atoms` is empty.
+pub fn emerge_deselect(atoms: &[String], root: &Path) -> Result<String, UseResolverError> {
+    if atoms.is_empty() {
+        return Ok(String::new());
+    }
+    run_world_command(&["--deselect"], atoms, root)
+}
+
+/// Reports what `emerge --depclean` would remove without removing anything.
+pub fn emerge_depclean_pretend(root: &Path) -> Result<String, UseResolverError> {
+    run_world_command(&["--depclean", "--pretend"], &[], root)
+}
+
+fn world_command_argv(args: &[&str], atoms: &[String], root: &Path) -> Vec<String> {
+    let mut argv = vec![
+        "emerge".to_string(),
+        "--root".to_string(),
+        root.to_string_lossy().to_string(),
+    ];
+    argv.extend(args.iter().map(|arg| arg.to_string()));
+    argv.extend(atoms.iter().cloned());
+    argv
+}
+
+fn run_world_command(
+    args: &[&str],
+    atoms: &[String],
+    root: &Path,
+) -> Result<String, UseResolverError> {
+    let argv = world_command_argv(args, atoms, root);
+    let output = exec::capture_command(&emerge_binary(), &argv[1..])?;
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    if !output.status.success() {
+        return Err(exec::ExecError::StepFailed {
+            step: argv.join(" "),
+            status: output.status,
+        }
+        .into());
+    }
+
+    Ok(combined)
+}
+
+/// Returns the argv vector that `emerge_select` would construct.
+pub fn emerge_select_command_for_test(atoms: &[String], root: &Path) -> Vec<String> {
+    world_command_argv(&["--noreplace", "--select"], atoms, root)
+}
+
+/// Returns the argv vector that `emerge_deselect` would construct.
+pub fn emerge_deselect_command_for_test(atoms: &[String], root: &Path) -> Vec<String> {
+    world_command_argv(&["--deselect"], atoms, root)
+}
+
+/// Returns the argv vector that `emerge_depclean_pretend` would construct.
+pub fn emerge_depclean_pretend_command_for_test(root: &Path) -> Vec<String> {
+    world_command_argv(&["--depclean", "--pretend"], &[], root)
 }
 
 impl EmergeStream {
@@ -293,6 +375,7 @@ pub fn emerge_command_for_test(
     root: &Path,
     jobs: usize,
     use_binpkgs: bool,
+    oneshot: bool,
 ) -> Vec<String> {
     let mut args = vec![
         "emerge".to_string(),
@@ -301,6 +384,9 @@ pub fn emerge_command_for_test(
         "--jobs".to_string(),
         jobs.to_string(),
     ];
+    if oneshot {
+        args.push("--oneshot".to_string());
+    }
     if use_binpkgs {
         args.push("--getbinpkg".to_string());
         args.push("--usepkg".to_string());
@@ -338,7 +424,85 @@ pub fn emerge_chroot_command_for_test(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_emerge_line, EmergeLine, ParserState};
+    use std::path::Path;
+
+    use super::{
+        emerge_command_for_test, emerge_deselect_command_for_test,
+        emerge_depclean_pretend_command_for_test, emerge_select_command_for_test,
+        parse_emerge_line, EmergeLine, ParserState,
+    };
+
+    #[test]
+    fn merge_command_includes_oneshot_when_requested() {
+        let argv = emerge_command_for_test(
+            &["=app-admin/example-1.0.0".to_owned()],
+            Path::new("/"),
+            2,
+            false,
+            true,
+        );
+        assert!(argv.contains(&"--oneshot".to_owned()));
+    }
+
+    #[test]
+    fn merge_command_omits_oneshot_when_not_requested() {
+        let argv = emerge_command_for_test(
+            &["=app-admin/example-1.0.0".to_owned()],
+            Path::new("/"),
+            2,
+            false,
+            false,
+        );
+        assert!(!argv.contains(&"--oneshot".to_owned()));
+    }
+
+    #[test]
+    fn select_command_uses_noreplace_and_bare_atoms() {
+        let argv =
+            emerge_select_command_for_test(&["app-admin/example".to_owned()], Path::new("/"));
+        assert_eq!(
+            argv,
+            vec![
+                "emerge".to_owned(),
+                "--root".to_owned(),
+                "/".to_owned(),
+                "--noreplace".to_owned(),
+                "--select".to_owned(),
+                "app-admin/example".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn deselect_command_targets_bare_atoms() {
+        let argv =
+            emerge_deselect_command_for_test(&["app-admin/example".to_owned()], Path::new("/"));
+        assert_eq!(
+            argv,
+            vec![
+                "emerge".to_owned(),
+                "--root".to_owned(),
+                "/".to_owned(),
+                "--deselect".to_owned(),
+                "app-admin/example".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn depclean_pretend_command_never_touches_atoms() {
+        let argv = emerge_depclean_pretend_command_for_test(Path::new("/"));
+        assert_eq!(
+            argv,
+            vec![
+                "emerge".to_owned(),
+                "--root".to_owned(),
+                "/".to_owned(),
+                "--depclean".to_owned(),
+                "--pretend".to_owned(),
+            ]
+        );
+    }
 
     #[test]
     fn parses_build_start_line() {

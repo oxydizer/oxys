@@ -1063,14 +1063,10 @@ dependencies = [
 name = "oxys-installer"
 version = "0.1.0"
 dependencies = [
- "clap",
- "colored",
  "crossterm",
  "oxys",
  "ratatui",
- "serde",
  "tokio",
- "toml",
 ]
 
 [[package]]

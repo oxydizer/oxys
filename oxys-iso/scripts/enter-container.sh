@@ -20,6 +20,14 @@
 #                        build.sh; no default here — see oxys-iso/README.md).
 #   OXYS_KERNEL_BUILD_ID Forwarded into the container for build.sh (optional).
 #   OXYS_TREEISH        Forwarded into the container for build.sh (optional).
+#   OXYS_GIT_REFRESH=0  Reuse all prefetched Git commits without attempting to
+#                       update them from their upstream repositories.
+#   OXYS_STAGE1_PACKAGES Forwarded to build.sh: build ONLY these atoms (plus the
+#                        deps Portage pulls) in livecd-stage1, instead of the
+#                        full live set -- e.g. "gui-shells/noctalia" to iterate
+#                        fast on one package. Pair with OXYS_STAGE1_ONLY=1.
+#   OXYS_STAGE1_ONLY=1   Forwarded to build.sh: stop after livecd-stage1 (no
+#                        kernel/squashfs/ISO). A compile smoke-test, not an ISO.
 
 set -euo pipefail
 
@@ -46,6 +54,9 @@ esac
 
 # --- refresh generated payloads before the container sees the repo -----------
 if [[ "${CMD[0]}" == "/oxys/oxys-iso/build.sh" ]]; then
+    # Fetch live sources before the expensive catalyst stage. If DNS is down
+    # and a previous complete cache exists, the prefetch script reuses it.
+    "${REPO_DIR}/scripts/prefetch-git-sources.sh"
     "${REPO_DIR}/scripts/build-installer-overlay.sh"
 fi
 
@@ -74,4 +85,6 @@ exec "${PODMAN[@]}" run --privileged --rm -it \
     ${OXYS_ARCH:+-e OXYS_ARCH="${OXYS_ARCH}"} \
     ${OXYS_KERNEL_BUILD_ID:+-e OXYS_KERNEL_BUILD_ID="${OXYS_KERNEL_BUILD_ID}"} \
     ${OXYS_TREEISH:+-e OXYS_TREEISH="${OXYS_TREEISH}"} \
+    ${OXYS_STAGE1_PACKAGES:+-e OXYS_STAGE1_PACKAGES="${OXYS_STAGE1_PACKAGES}"} \
+    ${OXYS_STAGE1_ONLY:+-e OXYS_STAGE1_ONLY="${OXYS_STAGE1_ONLY}"} \
     "${IMAGE}" "${CMD[@]}"

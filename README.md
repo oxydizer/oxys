@@ -40,3 +40,7 @@ both in one repo, with `oxys-iso` consuming `oxys-build`'s tagged output
 directly, keeps there being exactly one kernel build to reason about.
 
 See [oxys/OVERVIEW.md](oxys/OVERVIEW.md) for the `oxys` crate's architecture, [CONFIG.md](CONFIG.md) for the configuration reference, and each subproject's own README/docs for build/run instructions.
+
+The proposed native `.oxys` binary package format, dependency resolver,
+Portage compatibility model, and fast live-ISO composition roadmap are detailed
+in [OXYS_PACKAGE_FORMAT.md](OXYS_PACKAGE_FORMAT.md).

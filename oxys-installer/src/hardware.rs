@@ -58,6 +58,43 @@ fn detect_cpu_model() -> String {
         .unwrap_or_else(fallback)
 }
 
+/// Strips marketing filler ("12th Gen", "Intel(R) Core(TM)", clock speed,
+/// core-count suffixes) from a `/proc/cpuinfo` model name, e.g. turns
+/// "12th Gen Intel(R) Core(TM) i9-12900H" into "i9-12900H".
+pub(crate) fn shorten_cpu_model(model: &str) -> String {
+    let cleaned = model
+        .replace("(R)", "")
+        .replace("(TM)", "")
+        .replace("(C)", "");
+
+    let is_ordinal = |w: &str| {
+        w.len() > 2
+            && w[..w.len() - 2].chars().all(|c| c.is_ascii_digit())
+            && matches!(&w[w.len() - 2..], "th" | "st" | "nd" | "rd")
+    };
+
+    let words: Vec<&str> = cleaned.split_whitespace().collect();
+    let mut out: Vec<&str> = Vec::new();
+    for (i, w) in words.iter().enumerate() {
+        if is_ordinal(w) && words.get(i + 1) == Some(&"Gen") {
+            continue;
+        }
+        match *w {
+            "Gen" | "Intel" | "Core" | "AMD" | "Genuine" | "Processor" | "CPU" => continue,
+            "@" => continue,
+            w if w.ends_with("GHz") || w.ends_with("-Core") => continue,
+            _ => out.push(w),
+        }
+    }
+
+    let result = out.join(" ");
+    if result.trim().is_empty() {
+        model.trim().to_string()
+    } else {
+        result
+    }
+}
+
 fn disks_display() -> String {
     let disks = detect_disks();
     if disks.is_empty() {

@@ -10,12 +10,14 @@ oxys-iso/
 ├── build.sh                       # runs both catalyst stages in order
 ├── Containerfile                  # Gentoo stage3 + catalyst pre-installed
 │                                   # (+ catalyst-overrides/kmerge.sh baked in)
+├── git-sources.conf               # live git-r3 sources prefetched before build
 ├── catalyst-overrides/
 │   └── kmerge.sh                  # replaces catalyst's own kmerge.sh: injects
 │                                   # oxys-build's tagged kernel+zfs-kmod instead
 │                                   # of emerging/compiling one
 ├── scripts/
 │   ├── enter-container.sh         # build+enter the catalyst container (rootful)
+│   ├── prefetch-git-sources.sh    # cache configured Git sources before catalyst
 │   ├── resolve-kernel-build.sh    # finds+verifies the oxys-build kernel/zfs-kmod
 │   │                               # pair for OXYS_ARCH/OXYS_KERNEL_BUILD_ID
 │   └── run-qemu.sh                # boot a built ISO in QEMU
@@ -141,15 +143,37 @@ sudo pacman -S --needed podman
 
 # ---- now inside the container ----
 catalyst -s stable                    # create the repo snapshot (first time only)
-OXYS_ARCH=alderlake /oxys/oxys-iso/build.sh   # downloads the seed if missing, then builds
+exit
+
+# ---- back on the host; prefetches live Git sources, then builds ----
+OXYS_ARCH=alderlake ./scripts/enter-container.sh build
 ```
 
-Or drive the whole build non-interactively (still creates the snapshot on first
-run inside if needed):
+After that first snapshot setup, subsequent builds are the same one-liner:
 
 ```sh
 OXYS_ARCH=v3 ./scripts/enter-container.sh build    # runs /oxys/oxys-iso/build.sh in the container
 ```
+
+The `build` wrapper reads `git-sources.conf` and fetches every configured live
+Git source into `.build/source-cache` before entering the container. Catalyst
+receives the bare repositories through its distfiles mount, and build.sh
+generates package-scoped `EVCS_OFFLINE` mappings, so the later `git-r3` unpack
+phases do not contact GitHub or another upstream. If a refresh fails but a
+complete cache already exists, the build uses that cached commit. Set
+`OXYS_GIT_REFRESH=0` to deliberately perform a fully cached rebuild.
+
+To add another live Git ebuild, add one whitespace-separated row to
+`git-sources.conf`:
+
+```text
+<package-atom> <repository-uri> [ref]
+```
+
+The helper derives the same store basename that `git-r3` uses beneath
+`${DISTDIR}/git3-src`. No package-specific prefetch script, cache path, or
+`package.env` file is needed. Use `HEAD` (the default), a full `refs/heads/...`
+or `refs/tags/...` name, or a full commit ID matching what the ebuild requests.
 
 The image persists, so subsequent runs skip the catalyst compile entirely. The
 host `~/catalyst` bind mount holds the seed, snapshot, and output across runs.
@@ -166,6 +190,10 @@ If you'd rather run the steps by hand, or need to debug the environment:
 # 1. On the Arch host. podman won't auto-create bind-mount sources, so the
 #    storage dir must exist first (else: statfs ~/catalyst: no such file...).
 mkdir -p ~/catalyst/{builds,packages,snapshots,tmp,kerncache}
+
+#    Prefetch all configured live Git sources while still on the host. The
+#    monorepo bind below makes this ignored cache visible inside the container.
+/path/to/oxys/oxys-iso/scripts/prefetch-git-sources.sh
 
 # 2. Enter a Gentoo stage3 container. Run it ROOTFUL (sudo) with loop-device
 #    passthrough: catalyst mounts its squashfs snapshot (and builds the ISO)
@@ -223,19 +251,37 @@ Useful variants:
 ./scripts/run-qemu.sh disk=4G
 ./scripts/run-qemu.sh no-disk
 ./scripts/run-qemu.sh persist
+./scripts/run-qemu.sh share=/home/alex/shared
 ./scripts/run-qemu.sh /path/to/oxysos-amd64.iso
 ```
 
-By default, the script creates and attaches an `8G` install target disk named
+By default, the script creates and attaches a `24G` install target disk named
 `oxys-install.qcow2` next to the selected ISO. Set
 `OXYS_DISK_SIZE=4G`, pass `disk=4G`, or set `OXYS_DISK=/path/to/disk.qcow2`
 to override it.
 
+Pass `share=/path/to/folder`, or set `OXYS_SHARE`, to expose a host directory
+to the guest with the 9p mount tag `hostshare`. Mount it inside OxysOS with:
+
+```sh
+sudo mkdir -p /mnt/host
+sudo mount -t 9p -o trans=virtio,version=9p2000.L hostshare /mnt/host
+```
+
+The share is writable. QEMU's `mapped-xattr` security model keeps guest
+ownership metadata in extended attributes instead of changing host ownership.
+
 The QEMU display defaults to `virtio-vga-gl` with SDL OpenGL enabled, which is
 the path to test a Niri/Wayland install. Use `GL=0 ./scripts/run-qemu.sh` only
-for serial/headless boot debugging.
+for non-Wayland boot or installer debugging; Niri may not render in that mode.
 
 Set `OXYS_ISO_DIR=/path/to/builds` if your ISO output lives somewhere else.
+
+QEMU's virtio Ethernet device uses user-mode NAT and the guest automatically
+connects through the `OxysOS wired` DHCP profile. If graphics or SSH is
+unavailable, the runner's host terminal also carries a serial login; press
+`Ctrl-A c` to switch between the guest serial console and QEMU monitor. The
+live root password is `oxys`.
 
 > Loop devices: the `sudo` (rootful) + `--device /dev/loop-control -v /dev:/dev`
 > in the `podman run` line above are what make squashfs snapshot mounts and the

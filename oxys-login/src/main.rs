@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     restore_terminal(&mut terminal)?;
 
     match result {
-        Ok(AppExit::Quit) => Ok(()),
+        Ok(AppExit::Quit) => exec_tty_login(),
         Ok(AppExit::LaunchSession { username, password }) => {
             exec_niri_session(&username, &password)
         }
@@ -161,7 +161,7 @@ fn run_app(
             match rx.try_recv() {
                 Ok(true) => {
                     app.auth_in_progress = false;
-                    app.status = Some("Launching niri-session...".to_string());
+                    app.status = Some("Launching niri session...".to_string());
                     terminal.draw(|frame| render(frame, &app))?;
                     return Ok(AppExit::LaunchSession {
                         username: app.username.clone(),
@@ -415,7 +415,7 @@ fn render_login(frame: &mut Frame<'_>, area: Rect, app: &App) {
         ])
         .split(inner);
 
-    let header = Paragraph::new("Authenticate with PAM and start niri-session")
+    let header = Paragraph::new("Authenticate with PAM and start the niri session")
         .style(Style::default().fg(theme::DIM))
         .alignment(Alignment::Center);
     frame.render_widget(header, chunks[0]);
@@ -479,10 +479,9 @@ fn render_login(frame: &mut Frame<'_>, area: Rect, app: &App) {
         .alignment(Alignment::Center);
     frame.render_widget(spinner, chunks[5]);
 
-    let status_text = app
-        .status
-        .as_deref()
-        .unwrap_or("Tab switches fields. Enter submits. Ctrl+Q exits. Ctrl+C is ignored.");
+    let status_text = app.status.as_deref().unwrap_or(
+        "Tab switches fields. Enter submits. Ctrl+Q opens TTY login. Ctrl+C is ignored.",
+    );
     let status_color = if app.wrong_password {
         theme::WARN
     } else if app.auth_in_progress {
@@ -561,6 +560,14 @@ fn authenticate(username: &str, password: &str) -> Result<(), String> {
     Err(last_error)
 }
 
+fn exec_tty_login() -> Result<(), Box<dyn std::error::Error>> {
+    // oxys-login runs as agetty's login program on tty1. Replacing ourselves
+    // with the standard login program gives the operator a normal diagnostic
+    // shell; after logout, init respawns agetty and oxys-login appears again.
+    let error = Command::new("/bin/login").exec();
+    Err(format!("failed to exec /bin/login: {error}").into())
+}
+
 fn exec_niri_session(username: &str, password: &str) -> Result<(), Box<dyn std::error::Error>> {
     let user = get_user_by_name(username)
         .ok_or_else(|| format!("unable to resolve user record for {username}"))?;
@@ -575,10 +582,24 @@ fn exec_niri_session(username: &str, password: &str) -> Result<(), Box<dyn std::
     let environment = session_environment(&mut pam_session, username, uid, &home, &shell);
     let initgroups_user = CString::new(username)?;
 
+    // niri's own `niri-session` script drives `systemctl --user`, which does not
+    // exist on OpenRC/elogind, so it stalls right after niri loads its config.
+    // Launch niri the way the OpenRC niri ebuild rewrites the .desktop entry to:
+    // a private session bus (dbus-run-session) wrapping `niri --session`.
+    //
+    // Redirect niri's stdout+stderr to ~/niri.log so a hung or failed session
+    // can be inspected after the fact (e.g. over SSH: `less ~/niri.log`).
+    // Execing niri directly leaves no trace, and a wedged compositor holds tty1
+    // in graphics mode so its console output can't be scrolled back or even
+    // switched away from. `exec` keeps the tree as dbus-run-session -> niri, and
+    // RUST_BACKTRACE surfaces a panic location if niri aborts.
+    let session_cmd = "exec niri --session >\"${HOME}/niri.log\" 2>&1";
     let _ = unsafe {
-        Command::new("niri-session")
+        Command::new("dbus-run-session")
+            .args(["--", "sh", "-c", session_cmd])
             .env_clear()
             .envs(environment)
+            .env("RUST_BACKTRACE", "1")
             .current_dir(&home)
             .pre_exec(move || {
                 if libc::initgroups(initgroups_user.as_ptr(), gid) != 0 {
@@ -596,7 +617,7 @@ fn exec_niri_session(username: &str, password: &str) -> Result<(), Box<dyn std::
     };
 
     drop(pam_session);
-    Err("failed to exec niri-session".into())
+    Err("failed to exec dbus-run-session -- niri --session".into())
 }
 
 struct PamCredentials {

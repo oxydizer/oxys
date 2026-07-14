@@ -253,7 +253,14 @@ pub fn apply_portage_plan(
     jobs: usize,
 ) -> Result<EmergeStream, UseResolverError> {
     write_portage_plan_config(plan, portage_config_dir)?;
-    run_emerge(&plan.targets, root, portage_tmpdir, jobs, plan.use_binpkgs)
+    run_emerge(
+        &plan.targets,
+        root,
+        portage_tmpdir,
+        jobs,
+        plan.use_binpkgs,
+        true,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

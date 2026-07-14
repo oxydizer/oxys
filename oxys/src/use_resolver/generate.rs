@@ -40,7 +40,7 @@ const BINHOST_BASELINE_USE_FLAGS: &[&str] = &[
     "threads",
     "unicode",
 ];
-const BINHOST_BASELINE_VIDEO_CARDS: &str = "intel nouveau radeon radeonsi amdgpu";
+const BINHOST_BASELINE_VIDEO_CARDS: &str = "intel radeon radeonsi amdgpu virgl";
 const BINHOST_BASELINE_INPUT_DEVICES: &str = "libinput";
 const BINHOST_BASELINE_LLVM_TARGETS: &str = "AMDGPU X86";
 
@@ -256,14 +256,15 @@ pub fn generate_make_conf(
 pub fn gpu_to_video_cards(gpu: &Gpu) -> Option<&'static str> {
     match gpu {
         Gpu::Auto => None,
+        Gpu::Single(GpuVendor::Nvidia) => None,
         Gpu::Single(vendor) => Some(video_cards_for_vendor(*vendor)),
         Gpu::Hybrid { igpu, dgpu } => match (igpu, dgpu) {
             // TODO: Consider exposing explicit hybrid policy instead of flattening to combined VIDEO_CARDS.
             (GpuVendor::Intel, GpuVendor::Nvidia) | (GpuVendor::Nvidia, GpuVendor::Intel) => {
-                Some("intel i965 nvidia")
+                Some("intel i965")
             }
             (GpuVendor::Amd, GpuVendor::Nvidia) | (GpuVendor::Nvidia, GpuVendor::Amd) => {
-                Some("amdgpu radeonsi nvidia")
+                Some("amdgpu radeonsi")
             }
             (GpuVendor::Intel, GpuVendor::Amd) | (GpuVendor::Amd, GpuVendor::Intel) => {
                 Some("intel i965 amdgpu radeonsi")
@@ -287,7 +288,7 @@ pub fn should_enable_pgo(package: &str, optimisation: &BuildOptimisation) -> boo
 
 fn video_cards_for_vendor(vendor: GpuVendor) -> &'static str {
     match vendor {
-        GpuVendor::Nvidia => "nvidia",
+        GpuVendor::Nvidia => unreachable!("NVIDIA drivers are configured post-install"),
         GpuVendor::Amd => "amdgpu radeonsi",
         GpuVendor::Intel => "intel i965",
     }
@@ -688,11 +689,8 @@ mod tests {
     }
 
     #[test]
-    fn gpu_to_video_cards_maps_nvidia() {
-        assert_eq!(
-            gpu_to_video_cards(&Gpu::Single(GpuVendor::Nvidia)),
-            Some("nvidia")
-        );
+    fn gpu_to_video_cards_omits_nvidia() {
+        assert_eq!(gpu_to_video_cards(&Gpu::Single(GpuVendor::Nvidia)), None);
     }
 
     #[test]
@@ -756,7 +754,7 @@ mod tests {
         );
 
         assert!(output.make_conf.contains("CFLAGS="));
-        assert!(output.make_conf.contains("VIDEO_CARDS=\"nvidia\""));
+        assert!(!output.make_conf.contains("VIDEO_CARDS="));
         assert!(output.make_conf.contains("MAKEOPTS="));
     }
 
@@ -806,7 +804,7 @@ mod tests {
         ));
         assert!(output
             .make_conf
-            .contains("VIDEO_CARDS=\"intel nouveau radeon radeonsi amdgpu\""));
+            .contains("VIDEO_CARDS=\"intel radeon radeonsi amdgpu virgl\""));
         assert!(output.make_conf.contains("INPUT_DEVICES=\"libinput\""));
         assert!(output.make_conf.contains("LLVM_TARGETS=\"AMDGPU X86\""));
     }

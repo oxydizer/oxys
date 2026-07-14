@@ -17,4 +17,5 @@ pub(crate) const DIM: Color = Color::Rgb(143, 143, 144);
 pub(crate) const FAINT: Color = Color::Rgb(58, 56, 57);
 
 pub(crate) const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+pub(crate) const ASCII_SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
 pub(crate) const FILL: [&str; 5] = [" ", "░", "▒", "▓", "█"];

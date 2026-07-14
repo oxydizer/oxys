@@ -1,8 +1,86 @@
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::mpsc::Sender;
 
 use crate::manifest::{Disk, DiskLayout};
 
-use super::{blkid_value, write_file, DiskPartitionMap, SystemInstallError};
+use super::{blkid_value, write_file, DiskPartitionMap, SystemInstallError, SystemInstallEvent};
+
+/// Post-copy sanity check on the freshly rsync'd target root. Catches two
+/// failure classes that otherwise only surface at first boot:
+///   * a truncated copy (a full target disk aborts rsync partway, leaving
+///     whole subtrees like /var/db/pkg missing), and
+///   * missing wired-networking runtime files that would leave the installed
+///     system offline on first boot, and
+///   * mis-owned system directories (e.g. /var owned by a uid other than root,
+///     which trips systemd-tmpfiles' "unsafe path transition" check).
+/// Runs before we chroot in, so a broken root fails loud instead of being built
+/// upon. Ownership is only asserted for dirs that are root:root on every stock
+/// system; /home and mount stubs are deliberately excluded.
+pub(super) fn verify_target_layout(
+    target_mount: &Path,
+    sender: &Sender<SystemInstallEvent>,
+) -> Result<(), SystemInstallError> {
+    // Must exist as directories after a complete copy.
+    const REQUIRED_DIRS: &[&str] = &[
+        "etc", "usr", "var", "var/tmp", "bin", "sbin", "lib", "root", "var/db/pkg",
+    ];
+    const REQUIRED_FILES: &[&str] = &[
+        "etc/init.d/NetworkManager",
+        "etc/NetworkManager/system-connections/oxys-wired.nmconnection",
+    ];
+    // Must be owned by root:root (uid 0 / gid 0) on any stock system.
+    const ROOT_OWNED: &[&str] = &["", "etc", "usr", "var", "var/tmp", "bin", "sbin", "root"];
+
+    let mut problems = Vec::new();
+
+    for rel in REQUIRED_DIRS {
+        let path = target_mount.join(rel);
+        if !path.is_dir() {
+            problems.push(format!("missing directory /{rel} (copy incomplete?)"));
+        }
+    }
+
+    for rel in REQUIRED_FILES {
+        let path = target_mount.join(rel);
+        if !path.is_file() {
+            problems.push(format!("missing file /{rel} (wired networking unavailable)"));
+        }
+    }
+
+    for rel in ROOT_OWNED {
+        let path = target_mount.join(rel);
+        match path.symlink_metadata() {
+            Ok(meta) => {
+                let (uid, gid) = (meta.uid(), meta.gid());
+                if uid != 0 || gid != 0 {
+                    let shown = if rel.is_empty() { "/" } else { rel };
+                    problems.push(format!(
+                        "/{} is owned by {uid}:{gid}, expected root (0:0)",
+                        shown.trim_start_matches('/')
+                    ));
+                }
+            }
+            // A missing entry here is already reported by the REQUIRED_DIRS pass
+            // (or is a path like "" that always exists); don't double-count.
+            Err(_) => {}
+        }
+    }
+
+    if problems.is_empty() {
+        let _ = sender.send(SystemInstallEvent::StepOutput {
+            line: "target layout OK: critical dirs present and root-owned".to_owned(),
+        });
+        return Ok(());
+    }
+
+    for problem in &problems {
+        let _ = sender.send(SystemInstallEvent::StepOutput {
+            line: format!("target check: {problem}"),
+        });
+    }
+    Err(SystemInstallError::TargetValidationFailed(problems.join("; ")))
+}
 
 pub(super) fn write_fstab(disk: &Disk, target_mount: &Path) -> Result<(), SystemInstallError> {
     let parts = DiskPartitionMap::from_disk(disk);
@@ -43,4 +121,36 @@ pub(super) fn write_fstab(disk: &Disk, target_mount: &Path) -> Result<(), System
 
 pub(super) fn reset_machine_id(target_mount: &Path) -> Result<(), SystemInstallError> {
     write_file(&target_mount.join("etc/machine-id"), "")
+}
+
+/// Write both the conventional hostname file and Gentoo OpenRC's hostname
+/// service configuration. The latter is what sets the kernel nodename shown
+/// by `uname -a`; writing only /etc/hostname leaves Gentoo's `livecd` value in
+/// place after the live root is copied to the installed system.
+pub(super) fn write_hostname(
+    hostname: &str,
+    target_mount: &Path,
+) -> Result<(), SystemInstallError> {
+    let hostname = hostname.trim();
+    let valid = !hostname.is_empty()
+        && hostname.len() <= 64
+        && hostname
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
+        && !matches!(hostname.as_bytes().first(), Some(b'-' | b'.'))
+        && !matches!(hostname.as_bytes().last(), Some(b'-' | b'.'));
+    if !valid {
+        return Err(SystemInstallError::InvalidPlan(format!(
+            "invalid hostname {hostname:?}: use 1-64 letters, digits, dots, or hyphens"
+        )));
+    }
+
+    write_file(
+        &target_mount.join("etc/hostname"),
+        &format!("{hostname}\n"),
+    )?;
+    write_file(
+        &target_mount.join("etc/conf.d/hostname"),
+        &format!("# generated by oxys\nhostname=\"{hostname}\"\n"),
+    )
 }

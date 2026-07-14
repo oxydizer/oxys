@@ -1,0 +1,18 @@
+[connection]
+id=OxysOS wired
+uuid=86b93480-0417-4f81-9b1b-a70b2bb6fc52
+type=ethernet
+autoconnect=true
+autoconnect-retries=0
+
+[ethernet]
+
+[ipv4]
+method=auto
+may-fail=false
+
+[ipv6]
+method=auto
+may-fail=true
+
+[proxy]

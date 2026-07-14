@@ -54,6 +54,7 @@ metadata_field() {
 KERNEL_METADATA="" KERNEL_TARBALL=""
 ZFS_KMOD_METADATA="" ZFS_KMOD_TARBALL=""
 ZFS_USERLAND_METADATA="" ZFS_USERLAND_TARBALL=""
+KERNEL_CREATED="" ZFS_KMOD_CREATED="" ZFS_USERLAND_CREATED=""
 
 shopt -s nullglob
 for meta in "${ARCH_DIR}"/*.metadata; do
@@ -70,19 +71,36 @@ for meta in "${ARCH_DIR}"/*.metadata; do
 	[[ -n "${archive_name}" ]] || die "malformed metadata (no archive= line): ${meta}"
 	archive_path="${ARCH_DIR}/${archive_name}"
 	[[ -f "${archive_path}" ]] || die "metadata ${meta} names archive ${archive_name}, but it doesn't exist at ${archive_path}"
+	created_utc="$(metadata_field "${meta}" created_utc)"
+	[[ -n "${created_utc}" ]] || die "malformed metadata (no created_utc= line): ${meta}"
 
 	case "${atom}" in
 	sys-kernel/gentoo-sources*)
-		KERNEL_METADATA="${meta}"
-		KERNEL_TARBALL="${archive_path}"
+		if [[ -z "${KERNEL_CREATED}" || "${created_utc}" > "${KERNEL_CREATED}" ]]; then
+			KERNEL_METADATA="${meta}"
+			KERNEL_TARBALL="${archive_path}"
+			KERNEL_CREATED="${created_utc}"
+		elif [[ "${created_utc}" == "${KERNEL_CREATED}" && "${meta}" != "${KERNEL_METADATA}" ]]; then
+			die "ambiguous kernel metadata with identical created_utc=${created_utc}: ${KERNEL_METADATA} and ${meta}"
+		fi
 		;;
 	sys-fs/zfs-kmod-*)
-		ZFS_KMOD_METADATA="${meta}"
-		ZFS_KMOD_TARBALL="${archive_path}"
+		if [[ -z "${ZFS_KMOD_CREATED}" || "${created_utc}" > "${ZFS_KMOD_CREATED}" ]]; then
+			ZFS_KMOD_METADATA="${meta}"
+			ZFS_KMOD_TARBALL="${archive_path}"
+			ZFS_KMOD_CREATED="${created_utc}"
+		elif [[ "${created_utc}" == "${ZFS_KMOD_CREATED}" && "${meta}" != "${ZFS_KMOD_METADATA}" ]]; then
+			die "ambiguous zfs-kmod metadata with identical created_utc=${created_utc}: ${ZFS_KMOD_METADATA} and ${meta}"
+		fi
 		;;
 	sys-fs/zfs-[0-9]*)
-		ZFS_USERLAND_METADATA="${meta}"
-		ZFS_USERLAND_TARBALL="${archive_path}"
+		if [[ -z "${ZFS_USERLAND_CREATED}" || "${created_utc}" > "${ZFS_USERLAND_CREATED}" ]]; then
+			ZFS_USERLAND_METADATA="${meta}"
+			ZFS_USERLAND_TARBALL="${archive_path}"
+			ZFS_USERLAND_CREATED="${created_utc}"
+		elif [[ "${created_utc}" == "${ZFS_USERLAND_CREATED}" && "${meta}" != "${ZFS_USERLAND_METADATA}" ]]; then
+			die "ambiguous zfs metadata with identical created_utc=${created_utc}: ${ZFS_USERLAND_METADATA} and ${meta}"
+		fi
 		;;
 	esac
 done
@@ -97,6 +115,8 @@ ZFS_KMOD_KERNEL_RELEASE="$(metadata_field "${ZFS_KMOD_METADATA}" kernel_release)
 
 [[ -n "${KERNEL_RELEASE}" ]] || die "kernel metadata ${KERNEL_METADATA} has no kernel_release field."
 [[ "${KERNEL_RELEASE}" == "${ZFS_KMOD_KERNEL_RELEASE}" ]] || die "kernel/zfs-kmod pairing check failed: kernel_release mismatch (kernel=${KERNEL_RELEASE}, zfs-kmod=${ZFS_KMOD_KERNEL_RELEASE}) for build_id=${BUILD_ID}. This should be impossible for a single build_id -- do not use these artifacts."
+[[ "${KERNEL_RELEASE}" == *-oxys ]] || die "kernel release '${KERNEL_RELEASE}' is not OxysOS-branded (expected an -oxys suffix). Rebuild the kernel before building the ISO."
+[[ "${KERNEL_RELEASE}" != *gentoo* ]] || die "kernel release '${KERNEL_RELEASE}' still contains 'gentoo'. Rebuild the kernel before building the ISO."
 
 cat <<EOF
 OXYS_RESOLVED_ARCH=${ARCH}

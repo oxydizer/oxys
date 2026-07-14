@@ -1,12 +1,15 @@
 # Keywording for the baked desktop stack (see specs/installcd-stage1.spec).
-# GURU + oxys-overlay packages, and noctalia's live ebuild, are unkeyworded, so
-# they need `**`. The newer main-tree Wayland tools are ~amd64 on this stable
-# profile. NOTE: the first bake build may surface additional ~amd64 transitive
-# deps to add here -- that's expected for a first pass.
-gui-wm/niri **
+# Only genuinely unkeyworded (9999-only) ebuilds get `**`; that is noctalia
+# alone. niri, wlsunset and xwayland-satellite all ship a proper ~amd64 RELEASE
+# in GURU, so they take `~amd64` -- NOT `**`. Using `**` on niri/wlsunset picked
+# their 9999 live (git-r3) ebuild, which needs an offline git seed we don't have
+# (only noctalia is in git-sources.conf) and dies at src_unpack. The newer
+# main-tree Wayland tools are ~amd64 on this stable profile. NOTE: the first bake
+# build may surface additional ~amd64 transitive deps to add here.
 gui-shells/noctalia **
-gui-apps/xwayland-satellite **
-gui-apps/wlsunset **
+gui-wm/niri ~amd64
+gui-apps/xwayland-satellite ~amd64
+gui-apps/wlsunset ~amd64
 gui-apps/foot ~amd64
 gui-apps/wl-clipboard ~amd64
 

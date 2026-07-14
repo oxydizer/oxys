@@ -46,7 +46,7 @@ snapshot_treeish: @TREEISH@
 # Consume stage1's output. @TIMESTAMP@ matches stage1 (build.sh keeps them equal).
 source_subpath: 23.0-default/livecd-stage1-amd64-@TIMESTAMP@
 
-portage_confdir: @REPO_DIR@/portage_confdir
+portage_confdir: @PORTAGE_CONFDIR@
 
 # ---- live medium settings ----
 livecd/fstype: squashfs
@@ -58,7 +58,10 @@ livecd/volid: OxysOS-amd64-@DATESTAMP@
 # dokeymap = prompt/allow keymap selection. Do not pass nodhcp: the live
 # environment starts NetworkManager below, and suppressing DHCP here makes the
 # boot-time networking story ambiguous.
-livecd/bootargs: dokeymap
+# Keep tty0 as the primary console for the graphical boot while also emitting
+# kernel/OpenRC output to ttyS0, where fsscript enables a recovery getty for the
+# QEMU runner's host terminal.
+livecd/bootargs: dokeymap console=ttyS0,115200 console=tty0
 # No livecd/cdtar: this catalyst install doesn't ship the frosted grub theme
 # tarball catalyst's stock spec examples reference. It's purely cosmetic
 # (bootloader background/theme) -- catalyst falls back to a plain default
@@ -73,16 +76,20 @@ livecd/bootargs: dokeymap
 # overlay/ (carries the oxys-installer binary) and a per-build scratch dir
 # build.sh populates from oxys-build's zfs userland tarball (zpool/zfs CLI +
 # libs -- no kernel-version coupling, so it doesn't need to go through the
-# kmerge.sh/kerncache path below).
-livecd/root_overlay: @REPO_DIR@/overlay @ZFS_OVERLAY@
+# kmerge.sh/kerncache path below). The first dir is a root:root-normalised copy
+# of overlay/ that build.sh stages (@OVERLAY_DIR@), NOT the uid-1000 git
+# checkout -- `rsync -a` preserves ownership, and shipping the checkout directly
+# leaves /var owned by uid 1000 on the live root (see build.sh for the details).
+livecd/root_overlay: @OVERLAY_DIR@ @ZFS_OVERLAY@
 # fsscript: shell script run *inside* the chroot after root_overlay is applied.
 # It does the autologin + zfs-autoload wiring (see fsscript/fsscript.sh).
 livecd/fsscript: @REPO_DIR@/fsscript/fsscript.sh
 
-# Start the live networking stack. This is ISO-specific OpenRC wiring; it is
-# separate from whatever services the installed-system manifest enables later.
+# Apply the OxysOS nodename during the boot runlevel, then start the live
+# networking stack. This is ISO-specific OpenRC wiring; it is separate from
+# whatever services the installed-system manifest enables later.
 # NetworkManager provides `nmtui` on the console for WiFi SSID/password entry.
-livecd/rcadd: dbus|default NetworkManager|default
+livecd/rcadd: hostname|boot dbus|default NetworkManager|default
 
 # ---- kernel: oxys-build's own tagged kernel + zfs-kmod, injected by
 #      ../catalyst-overrides/kmerge.sh (zero compilation, zero emerge) ----

@@ -36,8 +36,9 @@ source_subpath: 23.0-default/stage3-amd64-openrc-seed
 compression_mode: pixz
 
 # Our portage config overlay: enables binhost (getbinpkg) + ZFS USE flags.
-# build.sh substitutes @REPO_DIR@ with this repo's absolute path.
-portage_confdir: @REPO_DIR@/portage_confdir
+# build.sh copies the static config, adds generated offline Git-source mappings,
+# and substitutes @PORTAGE_CONFDIR@ with that per-build directory.
+portage_confdir: @PORTAGE_CONFDIR@
 
 # Extra ebuild repositories mounted into the build chroot so we can BAKE the
 # default desktop into the image (rsync'd to the target -- the flawless path;
@@ -56,17 +57,20 @@ livecd/use:
 	# Catalyst composes THIS list into the make.conf USE for the stage1 package
 	# merge, and it OVERRIDES portage_confdir/make.conf's USE -- so the global
 	# binhost-friendly desktop baseline from portage_confdir/make.conf must be
-	# repeated here. OpenRC remains the init system via the profile/spec; the
-	# global `systemd` flag only selects systemd-flavoured library integration
-	# where Gentoo's x86-64-v3 binhost publishes it; `-elogind` prevents
-	# REQUIRED_USE conflicts in packages that allow only one session backend.
+	# repeated here. OpenRC is the init system (profile + sysvinit from the base
+	# stage3). `elogind` (NOT `systemd`) MUST be the session/logind backend:
+	# `USE=systemd` is not merely "library integration" -- it makes logind
+	# consumers (dbus, polkit, NetworkManager) depend on sys-apps/systemd, which
+	# then owns /sbin/init and boots systemd instead of OpenRC (killing the
+	# /etc/inittab autologin and every OpenRC rcadd service). `-systemd elogind`
+	# keeps sys-apps/systemd out and OpenRC in charge.
 	# Keep Qt package-local: global qt6 pulls KDE Frameworks through unrelated
 	# packages such as pinentry, which the niri desktop does not need.
 	X
 	wayland
 	dbus
-	systemd
-	-elogind
+	-systemd
+	elogind
 	policykit
 	alsa
 	pipewire
@@ -196,7 +200,7 @@ livecd/packages:
 	# --- default desktop stack, BAKED into the image (rsync'd to the target, so
 	#     the default install needs no live emerge). Built here against the
 	#     wayland-enabled make.conf, using the GURU + oxys overlays (see `repos:`).
-	#     KEEP IN SYNC with oxys-installer/configs/desktop.rs. ---
+	#     KEEP IN SYNC with oxys-installer/configs/desktop.fe2o3. ---
 	# core apps / browser + audio server
 	www-client/firefox-bin
 	media-video/pipewire
