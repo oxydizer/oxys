@@ -1,10 +1,7 @@
 use std::{
-    fmt, fs,
+    fmt,
     path::{Path, PathBuf},
 };
-
-#[cfg(unix)]
-use std::os::unix::fs::FileTypeExt;
 
 use thiserror::Error;
 
@@ -13,9 +10,11 @@ use crate::manifest::{Disk, DiskLayout, Encryption, MB};
 
 mod apply;
 mod ext4;
+mod preflight;
 mod zfs;
 
 pub use apply::{apply_disk_plan, release_target_mounts};
+pub use preflight::{preflight, MIN_INSTALL_BYTES};
 
 pub type DiskStep = CommandStep;
 
@@ -61,8 +60,15 @@ pub enum DiskError {
     DeviceMissing(String),
     #[error("disk device is not a block device: {0}")]
     NotBlockDevice(String),
-    #[error("refusing to provision mounted/live disk: {0}")]
-    DeviceMounted(String),
+    /// Disk is mounted, swapped, held by LVM/RAID/dm, read-only, etc.
+    #[error("refusing to provision {device}: {reason}")]
+    DeviceBusy { device: String, reason: String },
+    #[error("disk too small: {device} is {have}, need at least {need}")]
+    DeviceTooSmall {
+        device: String,
+        have: String,
+        need: String,
+    },
     #[error("unsupported disk layout for real provisioning: {0:?}")]
     UnsupportedLayout(DiskLayout),
     #[error("unsupported disk encryption mode for real provisioning: {0:?}")]
@@ -216,38 +222,6 @@ pub(super) fn swap_partition_step(device: &str, number: usize, size: u64) -> Dis
             device,
         ],
     )
-}
-
-pub fn preflight(disk: &Disk) -> Result<(), DiskError> {
-    let device = disk.device.trim();
-    if device.is_empty() {
-        return Err(DiskError::MissingDevice);
-    }
-
-    let metadata = fs::metadata(device).map_err(|_| DiskError::DeviceMissing(device.to_owned()))?;
-
-    #[cfg(unix)]
-    if !metadata.file_type().is_block_device() {
-        return Err(DiskError::NotBlockDevice(device.to_owned()));
-    }
-
-    let device_path = Path::new(device);
-    let canonical_device = fs::canonicalize(device_path).unwrap_or_else(|_| device_path.into());
-    let mounts = fs::read_to_string("/proc/mounts").unwrap_or_default();
-    for line in mounts.lines() {
-        let mut fields = line.split_whitespace();
-        let Some(source) = fields.next() else {
-            continue;
-        };
-        if fields.next().is_none() {
-            continue;
-        }
-        if apply::mount_source_matches_device(source, device, &canonical_device) {
-            return Err(DiskError::DeviceMounted(device.to_owned()));
-        }
-    }
-
-    Ok(())
 }
 
 pub(super) fn mib(bytes: u64) -> u64 {

@@ -6,23 +6,18 @@ use std::{
 
 use clap::{Parser, Subcommand};
 use colored::Colorize;
-#[cfg(test)]
-use oxys::{Package, SystemManifest};
 use oxys::{diff::diff_packages, use_resolver::EmergeLine};
 
 mod cli;
 
 use cli::{
-    manifest_io::{
-        create_plan, effective_portage_config_dir, effective_system_manifest_path, load_manifest,
-        load_manifest_optional, persist_manifest_value,
-    },
+    manifest_io::{create_plan, load_manifest, load_manifest_optional, persist_manifest_value},
     output::{fail_on_conflicts, print_changes, print_plan},
 };
 
 const LOCAL_MANIFEST: &str = "manifest.toml";
 const SYSTEM_MANIFEST: &str = "/etc/oxys/current-manifest.toml";
-const DEFAULT_PORTAGE_TREE: &str = "/var/db/repos";
+const SYSTEM_CONFIG: &str = "/etc/oxys/config.fe2o3";
 const DEFAULT_PORTAGE_CONFIG_DIR: &str = "/etc/portage";
 const DEFAULT_ROOT: &str = "/";
 const DEFAULT_TARGET_MOUNT: &str = "/mnt/oxys";
@@ -102,6 +97,45 @@ enum Commands {
         #[arg(long, default_value = "/")]
         source_root: PathBuf,
     },
+    /// Build, inspect, verify, or directly install a local .oxys artifact.
+    Package {
+        #[command(subcommand)]
+        command: PackageCommands,
+    },
+    /// Remove a package previously installed from a .oxys artifact.
+    Remove {
+        /// Installed package identity in category/PF form.
+        package: String,
+        /// Alternate target root (defaults to the running system).
+        #[arg(long, default_value = "/")]
+        root: PathBuf,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PackageCommands {
+    /// Capture an installed Portage package and its complete VDB entry.
+    Build {
+        /// Package atom in category/package form.
+        atom: String,
+        /// Clean reference root containing the installed package.
+        #[arg(long, default_value = "/")]
+        root: PathBuf,
+        /// Artifact path to create.
+        #[arg(short, long, default_value = "package.oxys")]
+        output: PathBuf,
+    },
+    /// Print verified artifact metadata.
+    Inspect { artifact: PathBuf },
+    /// Fully verify framing, metadata, file table, tar, and hashes.
+    Verify { artifact: PathBuf },
+    /// Install an artifact and its captured Portage VDB entry.
+    Install {
+        artifact: PathBuf,
+        /// Alternate target root (defaults to the running system).
+        #[arg(long, default_value = "/")]
+        root: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -129,6 +163,15 @@ fn main() -> ExitCode {
             copy_system,
             source_root,
         } => cli::install::run(target, confirm, device, copy_system, &source_root),
+        Commands::Package { command } => match command {
+            PackageCommands::Build { atom, root, output } => {
+                cli::package::build(&root, &atom, &output)
+            }
+            PackageCommands::Inspect { artifact } => cli::package::inspect(&artifact),
+            PackageCommands::Verify { artifact } => cli::package::verify(&artifact),
+            PackageCommands::Install { artifact, root } => cli::package::install(&artifact, &root),
+        },
+        Commands::Remove { package, root } => cli::package::remove(&package, &root),
     };
 
     match result {
@@ -200,8 +243,9 @@ COMMON COMMANDS
         Apply local manifest.toml to the running system and persist it as current.
 
     oxys install <package> [package...]
-        Add package atoms to the installed system manifest, plan them, emerge them,
-        and persist the updated /etc/oxys/current-manifest.toml.
+        Add package atoms to the declarative source at /etc/oxys/config.fe2o3,
+        recompile it, then emerge the resulting plan and persist the applied state
+        to /etc/oxys/current-manifest.toml. The .fe2o3 source stays authoritative.
 
     oxys install system --device /dev/... --copy-system
         First-time OS install flow. This provisions the selected disk and copies
@@ -209,6 +253,18 @@ COMMON COMMANDS
 
     oxys update
         Run emerge --sync and a guarded emerge -uDN @world.
+
+    oxys package build gui-apps/wl-clipboard --root / --output wl-clipboard.oxys
+        Capture package files plus the complete Portage VDB entry.
+
+    oxys package verify <artifact.oxys>
+        Verify the framed container, canonical file table, tar, and hashes.
+
+    oxys package install <artifact.oxys> [--root /]
+        Install a local artifact, write its VDB entry, cache it, and write a receipt.
+
+    oxys remove <category/PF> [--root /]
+        Safely remove an artifact-installed package after verifying all file hashes.
 
 SAFETY NOTES
     Bare `oxys install` is intentionally rejected. Use `oxys install <package>`
@@ -388,6 +444,52 @@ mod tests {
     }
 
     #[test]
+    fn package_build_parses_reference_root_and_output() {
+        let cli = Cli::try_parse_from([
+            "oxys",
+            "package",
+            "build",
+            "gui-apps/wl-clipboard",
+            "--root",
+            "/reference",
+            "--output",
+            "wl.oxys",
+        ])
+        .expect("package build should parse");
+
+        match cli.command {
+            Commands::Package {
+                command: PackageCommands::Build { atom, root, output },
+            } => {
+                assert_eq!(atom, "gui-apps/wl-clipboard");
+                assert_eq!(root, PathBuf::from("/reference"));
+                assert_eq!(output, PathBuf::from("wl.oxys"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn package_remove_parses_exact_pf_and_root() {
+        let cli = Cli::try_parse_from([
+            "oxys",
+            "remove",
+            "gui-apps/wl-clipboard-2.2.1",
+            "--root",
+            "/target",
+        ])
+        .expect("package remove should parse");
+
+        match cli.command {
+            Commands::Remove { package, root } => {
+                assert_eq!(package, "gui-apps/wl-clipboard-2.2.1");
+                assert_eq!(root, PathBuf::from("/target"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
     fn bare_install_is_rejected_by_dispatcher() {
         let err = cli::install::run(Vec::new(), false, None, false, Path::new(DEFAULT_ROOT))
             .expect_err("bare install must be rejected");
@@ -405,33 +507,5 @@ mod tests {
         )
         .expect_err("package install should reject --confirm");
         assert!(err.to_string().contains("disk install flags"));
-    }
-
-    #[test]
-    fn add_packages_to_manifest_dedupes_existing_atoms() {
-        let mut manifest = SystemManifest {
-            packages: vec![Package::new("app-editors/vim")],
-            ..SystemManifest::default()
-        };
-
-        let added = cli::install::add_packages_to_manifest(
-            &mut manifest,
-            &[
-                "app-editors/vim".to_owned(),
-                "gui-wm/niri".to_owned(),
-                "www-client/firefox-bin".to_owned(),
-            ],
-        )
-        .expect("package add should succeed");
-
-        assert_eq!(added, vec!["gui-wm/niri", "www-client/firefox-bin"]);
-        assert_eq!(
-            manifest
-                .packages
-                .iter()
-                .map(|package| package.package.as_str())
-                .collect::<Vec<_>>(),
-            vec!["app-editors/vim", "gui-wm/niri", "www-client/firefox-bin"]
-        );
     }
 }

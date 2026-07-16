@@ -9,7 +9,7 @@ use oxys::{
     use_resolver::{PortagePlan, plan_portage},
 };
 
-use crate::{DEFAULT_PORTAGE_CONFIG_DIR, DEFAULT_PORTAGE_TREE, DEFAULT_ROOT, Result, SYSTEM_MANIFEST};
+use crate::{DEFAULT_PORTAGE_CONFIG_DIR, DEFAULT_ROOT, Result, SYSTEM_CONFIG, SYSTEM_MANIFEST};
 
 pub(crate) fn create_plan(manifest: &SystemManifest) -> Result<PortagePlan> {
     let resolved_graphics = manifest.resolved_graphics()?;
@@ -22,9 +22,7 @@ pub(crate) fn create_plan(manifest: &SystemManifest) -> Result<PortagePlan> {
 }
 
 pub(crate) fn effective_portage_tree() -> PathBuf {
-    std::env::var_os("OXYS_PORTAGE_TREE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_PORTAGE_TREE))
+    oxys::package_check::portage_tree_path()
 }
 
 pub(crate) fn effective_portage_config_dir() -> PathBuf {
@@ -45,6 +43,14 @@ pub(crate) fn effective_system_manifest_path() -> PathBuf {
     std::env::var_os("OXYS_SYSTEM_MANIFEST")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(SYSTEM_MANIFEST))
+}
+
+/// Path to the authoritative declarative source (`config.fe2o3`) that `oxys install`
+/// edits. Overridable so tests can point at a sandbox instead of the real `/etc`.
+pub(crate) fn effective_system_config_path() -> PathBuf {
+    std::env::var_os("OXYS_SYSTEM_CONFIG")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(SYSTEM_CONFIG))
 }
 
 pub(crate) fn load_manifest(path: &Path) -> Result<SystemManifest> {

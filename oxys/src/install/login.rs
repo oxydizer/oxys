@@ -441,9 +441,14 @@ setup_wizard_enabled = false
 position = "bottom"
 background_opacity = 0.93
 margin_edge = 4
-start = [ "launcher", "clock", "cpu", "active_window", "media" ]
+start = [ "launcher", "clock", "active_window",  ]
 center = [ "workspaces" ]
 end = [ "tray", "notifications", "battery", "volume", "brightness", "control-center" ]
+thickness = 40
+
+[widget.launcher]
+custom_image = "/usr/share/oxys/icons/launcher.svg"
+custom_image_colorize = true
 
 [dock]
 enabled = false

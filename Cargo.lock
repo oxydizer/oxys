@@ -1051,6 +1051,8 @@ dependencies = [
  "chrono",
  "clap",
  "colored",
+ "oxys-macros",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -1079,6 +1081,15 @@ dependencies = [
  "pam",
  "ratatui",
  "uzers",
+]
+
+[[package]]
+name = "oxys-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]

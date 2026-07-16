@@ -6,9 +6,10 @@ use crate::provisioning;
 use super::{is_valid_login_name, App, Screen};
 
 impl App {
-    /// Load the compiled manifest to see which users need an interactive
-    /// name. Returns the next screen: `Usernames` when there is at least one
-    /// such user, otherwise falls through to password collection.
+    /// Kick off interactive collection for everything the compiled manifest
+    /// left to the installer: timezone first, then usernames, then passwords.
+    /// Returns the first screen that actually needs input, falling through to
+    /// the install when there is nothing to ask.
     pub(super) fn begin_identity_collection(&mut self) -> Screen {
         if let Some(error) = provisioning::install_permission_error() {
             self.install_lines = vec![format!("[error] {error}")];
@@ -20,6 +21,89 @@ impl App {
             return Screen::Installing;
         }
 
+        let prompts_timezone = self
+            .compiled_manifest
+            .as_ref()
+            .and_then(|path| oxys::compile::load_manifest(path).ok())
+            .is_some_and(|manifest| manifest.prompts_timezone());
+
+        if prompts_timezone && self.begin_timezone_collection() {
+            return Screen::Timezone;
+        }
+        self.begin_username_collection()
+    }
+
+    /// Prepare the timezone picker from the live ISO's zoneinfo. Returns
+    /// false when no zones could be listed (broken live image); the flow then
+    /// skips the picker and `run_install` leaves the target on the live
+    /// root's zone.
+    fn begin_timezone_collection(&mut self) -> bool {
+        self.timezone_choices =
+            oxys::timezones::list_timezones(std::path::Path::new(oxys::timezones::ZONEINFO_PATH));
+        self.timezone_filter.clear();
+        // Land on UTC rather than the top of an alphabetical list.
+        self.timezone_cursor = self
+            .timezone_choices
+            .iter()
+            .position(|zone| zone == "UTC")
+            .unwrap_or(0);
+        self.collected_timezone = None;
+        !self.timezone_choices.is_empty()
+    }
+
+    /// Zones matching the current filter (case-insensitive substring).
+    pub(crate) fn filtered_timezones(&self) -> Vec<&str> {
+        let filter = self.timezone_filter.to_lowercase();
+        self.timezone_choices
+            .iter()
+            .filter(|zone| zone.to_lowercase().contains(&filter))
+            .map(String::as_str)
+            .collect()
+    }
+
+    /// Handle a keystroke on the timezone picker. Owns all keys so typed
+    /// filter characters (including `q`) never trigger global shortcuts.
+    pub(super) fn timezone_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                // Abandon collection and return to the confirm screen.
+                self.timezone_filter.clear();
+                self.collected_timezone = None;
+                self.current = Screen::Confirm;
+            }
+            KeyCode::Backspace => {
+                self.timezone_filter.pop();
+                self.timezone_cursor = 0;
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.timezone_filter.push(c);
+                self.timezone_cursor = 0;
+            }
+            KeyCode::Up => {
+                self.timezone_cursor = self.timezone_cursor.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                let last = self.filtered_timezones().len().saturating_sub(1);
+                self.timezone_cursor = (self.timezone_cursor + 1).min(last);
+            }
+            KeyCode::Enter => {
+                let picked = self
+                    .filtered_timezones()
+                    .get(self.timezone_cursor)
+                    .map(|zone| (*zone).to_owned());
+                if let Some(zone) = picked {
+                    self.collected_timezone = Some(zone);
+                    self.current = self.begin_username_collection();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Load the compiled manifest to see which users need an interactive
+    /// name. Returns the next screen: `Usernames` when there is at least one
+    /// such user, otherwise falls through to password collection.
+    fn begin_username_collection(&mut self) -> Screen {
         let indices: Vec<usize> = self
             .compiled_manifest
             .as_ref()

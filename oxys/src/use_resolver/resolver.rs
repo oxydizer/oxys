@@ -76,16 +76,27 @@ pub fn resolve_latest_version(
         .collect::<Vec<_>>();
 
     versions.sort_by(|left, right| compare_gentoo_versions(left, right));
-    versions
-        .pop()
-        .ok_or_else(|| UseResolverError::MetadataNotFound {
-            package: package.to_owned(),
-            path: portage_tree
+    versions.pop().ok_or_else(|| {
+        metadata_not_found(
+            package,
+            portage_tree
                 .join("metadata")
                 .join("md5-cache")
                 .join(category)
                 .join(format!("{package_name}-")),
-        })
+            portage_tree,
+        )
+    })
+}
+
+/// Build a `MetadataNotFound`, attaching a "did you mean" hint when the atom
+/// itself looks misspelled. The index scan runs only on this error path.
+fn metadata_not_found(package: &str, path: PathBuf, portage_tree: &Path) -> UseResolverError {
+    UseResolverError::MetadataNotFound {
+        package: package.to_owned(),
+        path,
+        suggestion_note: crate::package_check::suggestion_note_for(package, portage_tree),
+    }
 }
 
 fn plan_portage_internal(
@@ -529,25 +540,29 @@ fn metadata_path_for_manifest(
 
     match normalize_version(manifest.version.clone()) {
         Some(version) => find_metadata_path(portage_tree, category, package_name, &version)
-            .ok_or_else(|| UseResolverError::MetadataNotFound {
-                package: manifest.package.clone(),
-                path: portage_tree
-                    .join("metadata")
-                    .join("md5-cache")
-                    .join(category)
-                    .join(format!("{package_name}-{version}")),
-            }),
-        None => {
-            let version = resolve_latest_version(&manifest.package, portage_tree)?;
-            find_metadata_path(portage_tree, category, package_name, &version).ok_or_else(|| {
-                UseResolverError::MetadataNotFound {
-                    package: manifest.package.clone(),
-                    path: portage_tree
+            .ok_or_else(|| {
+                metadata_not_found(
+                    &manifest.package,
+                    portage_tree
                         .join("metadata")
                         .join("md5-cache")
                         .join(category)
                         .join(format!("{package_name}-{version}")),
-                }
+                    portage_tree,
+                )
+            }),
+        None => {
+            let version = resolve_latest_version(&manifest.package, portage_tree)?;
+            find_metadata_path(portage_tree, category, package_name, &version).ok_or_else(|| {
+                metadata_not_found(
+                    &manifest.package,
+                    portage_tree
+                        .join("metadata")
+                        .join("md5-cache")
+                        .join(category)
+                        .join(format!("{package_name}-{version}")),
+                    portage_tree,
+                )
             })
         }
     }

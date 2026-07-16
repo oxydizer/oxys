@@ -37,6 +37,8 @@ pub enum CompileStage {
     ManifestMissing,
     /// A `manifest.toml` was produced but did not validate.
     ManifestInvalid,
+    /// The manifest declares packages that exist in no configured repository.
+    UnknownPackages,
 }
 
 impl CompileStage {
@@ -48,6 +50,7 @@ impl CompileStage {
             CompileStage::Execute => "executing config",
             CompileStage::ManifestMissing => "manifest.toml not produced",
             CompileStage::ManifestInvalid => "validating manifest.toml",
+            CompileStage::UnknownPackages => "unknown packages",
         }
     }
 }
@@ -105,20 +108,35 @@ pub fn build_cache_dir() -> PathBuf {
     base.join("oxys").join("build")
 }
 
+/// A successful compilation: where the validated manifest landed, plus any
+/// non-fatal notices the caller should surface (e.g. a skipped package check).
+#[derive(Debug)]
+pub struct CompileOutcome {
+    pub manifest_path: PathBuf,
+    pub notices: Vec<String>,
+}
+
 /// Compile a standalone config `.rs` file into a validated `manifest.toml`.
 ///
 /// Builds the scaffold crate against the `oxys` crate at `oxys_crate_path`,
 /// runs the resulting binary with its working directory set to `out_dir` so
-/// `manifest.toml` lands there, then validates it. Returns the path to the
-/// validated manifest on success, or a [`CompileError`] carrying the compiler
-/// output on failure. This function blocks (it shells out to cargo); callers
-/// on an event loop should run it off-thread.
+/// `manifest.toml` lands there, validates it, and checks every declared
+/// package atom against the Portage tree (skipped with a notice when no tree
+/// is present). Returns a [`CompileError`] carrying the compiler output on
+/// failure. This function blocks (it shells out to cargo); callers on an
+/// event loop should run it off-thread.
 pub fn compile_config_file(
     file: &Path,
     oxys_crate_path: &str,
     out_dir: &Path,
-) -> Result<PathBuf, CompileError> {
-    compile_config_file_in(file, oxys_crate_path, out_dir, &build_cache_dir())
+) -> Result<CompileOutcome, CompileError> {
+    compile_config_file_in(
+        file,
+        oxys_crate_path,
+        out_dir,
+        &build_cache_dir(),
+        &crate::package_check::portage_tree_path(),
+    )
 }
 
 /// Like [`compile_config_file`] but with an explicit scaffold build directory.
@@ -132,7 +150,8 @@ fn compile_config_file_in(
     oxys_crate_path: &str,
     out_dir: &Path,
     build_dir: &Path,
-) -> Result<PathBuf, CompileError> {
+    portage_tree: &Path,
+) -> Result<CompileOutcome, CompileError> {
     if !file.exists() {
         return Err(CompileError::new(
             CompileStage::Scaffold,
@@ -187,8 +206,30 @@ fn compile_config_file_in(
             "compilation completed but manifest.toml was not created",
         ));
     }
-    load_and_validate(&manifest_path)?;
-    Ok(manifest_path)
+    let manifest = load_and_validate(&manifest_path)?;
+
+    let mut notices = Vec::new();
+    match crate::package_check::check_packages(&manifest, portage_tree) {
+        crate::package_check::PackageCheckOutcome::NoPortageTree { tree } => {
+            notices.push(format!(
+                "note: no Portage tree found at {}; skipping package name check",
+                tree.display()
+            ));
+        }
+        crate::package_check::PackageCheckOutcome::Checked(unknown) if !unknown.is_empty() => {
+            return Err(CompileError::new(
+                CompileStage::UnknownPackages,
+                format!("{} unknown package(s) in config", unknown.len()),
+            )
+            .with_output(crate::package_check::render_unknown_packages(&unknown)));
+        }
+        crate::package_check::PackageCheckOutcome::Checked(_) => {}
+    }
+
+    Ok(CompileOutcome {
+        manifest_path,
+        notices,
+    })
 }
 
 /// Read and checksum-validate a generated `manifest.toml`.
@@ -236,6 +277,16 @@ mod tests {
         path
     }
 
+    /// Build a minimal Portage repo (metadata/md5-cache) with the given atoms.
+    fn write_fixture_tree(dir: &Path, atoms: &[&str]) {
+        for atom in atoms {
+            let (category, name) = atom.split_once('/').unwrap();
+            let category_dir = dir.join("metadata").join("md5-cache").join(category);
+            fs::create_dir_all(&category_dir).unwrap();
+            fs::write(category_dir.join(format!("{name}-1.0")), "").unwrap();
+        }
+    }
+
     #[test]
     fn valid_config_compiles_to_a_loadable_manifest() {
         let tmp = tempfile::tempdir().unwrap();
@@ -248,15 +299,21 @@ oxys::main!(config);
         );
         let out = tempfile::tempdir().unwrap();
         let build = tempfile::tempdir().unwrap();
-        let manifest = compile_config_file_in(
+        let tree = tempfile::tempdir().unwrap();
+        let outcome = compile_config_file_in(
             &config,
             oxys_crate_dir().to_str().unwrap(),
             out.path(),
             build.path(),
+            tree.path(),
         )
         .expect("valid config should compile");
-        assert!(manifest.exists());
-        load_manifest(&manifest).expect("produced manifest should validate");
+        assert!(outcome.manifest_path.exists());
+        load_manifest(&outcome.manifest_path).expect("produced manifest should validate");
+        // The empty temp dir holds no repository: the package check is
+        // skipped and reported as a notice, not a failure.
+        assert_eq!(outcome.notices.len(), 1);
+        assert!(outcome.notices[0].contains("skipping package name check"));
     }
 
     #[test]
@@ -268,14 +325,118 @@ oxys::main!(config);
         );
         let out = tempfile::tempdir().unwrap();
         let build = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
         let err = compile_config_file_in(
             &config,
             oxys_crate_dir().to_str().unwrap(),
             out.path(),
             build.path(),
+            tree.path(),
         )
         .expect_err("broken config should fail");
         assert_eq!(err.stage, CompileStage::CargoBuild);
         assert!(!err.output.is_empty(), "compiler output should be captured");
+    }
+
+    #[test]
+    fn attribute_style_config_compiles_without_spreads_or_main() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = write_config(
+            tmp.path(),
+            r#"use oxys::prelude::*;
+
+#[oxys::config]
+pub fn config() -> Oxys {
+    Oxys {
+        os: Os {
+            hostname: "test-host".into(),
+        },
+        packages: vec![Package::new("net-misc/curl")],
+    }
+}
+"#,
+        );
+        let out = tempfile::tempdir().unwrap();
+        let build = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        write_fixture_tree(tree.path(), &["net-misc/curl"]);
+        let outcome = compile_config_file_in(
+            &config,
+            oxys_crate_dir().to_str().unwrap(),
+            out.path(),
+            build.path(),
+            tree.path(),
+        )
+        .expect("attribute-style config should compile");
+        let manifest =
+            load_manifest(&outcome.manifest_path).expect("produced manifest should validate");
+        assert_eq!(manifest.os.hostname, "test-host");
+        assert_eq!(manifest.packages.len(), 1);
+    }
+
+    #[test]
+    fn unknown_package_fails_with_suggestion() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = write_config(
+            tmp.path(),
+            r#"use oxys::prelude::*;
+fn config() -> Oxys {
+    Oxys {
+        packages: vec![Package::new("gui-apps/wl-clipbord")],
+        ..Default::default()
+    }
+}
+oxys::main!(config);
+"#,
+        );
+        let out = tempfile::tempdir().unwrap();
+        let build = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        write_fixture_tree(tree.path(), &["gui-apps/wl-clipboard", "net-misc/curl"]);
+        let err = compile_config_file_in(
+            &config,
+            oxys_crate_dir().to_str().unwrap(),
+            out.path(),
+            build.path(),
+            tree.path(),
+        )
+        .expect_err("unknown package should fail the compile");
+        assert_eq!(err.stage, CompileStage::UnknownPackages);
+        assert!(
+            err.output
+                .contains("did you mean 'gui-apps/wl-clipboard'"),
+            "output should carry the suggestion, got: {}",
+            err.output
+        );
+    }
+
+    #[test]
+    fn known_packages_pass_the_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = write_config(
+            tmp.path(),
+            r#"use oxys::prelude::*;
+fn config() -> Oxys {
+    Oxys {
+        packages: vec![Package::new("net-misc/curl")],
+        ..Default::default()
+    }
+}
+oxys::main!(config);
+"#,
+        );
+        let out = tempfile::tempdir().unwrap();
+        let build = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        write_fixture_tree(tree.path(), &["net-misc/curl"]);
+        let outcome = compile_config_file_in(
+            &config,
+            oxys_crate_dir().to_str().unwrap(),
+            out.path(),
+            build.path(),
+            tree.path(),
+        )
+        .expect("known packages should compile");
+        assert!(outcome.notices.is_empty());
     }
 }

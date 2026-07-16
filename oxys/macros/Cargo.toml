@@ -1,0 +1,19 @@
+# Proc-macro companion to the `oxys` crate (the `#[oxys::config]` attribute).
+# Nested inside oxys/ so the `path = "macros"` dependency survives the ISO
+# staging copy in oxys-iso/scripts/build-installer-overlay.sh unchanged.
+# Deps are pinned literally for the same standalone-staging reason as oxys/.
+[package]
+name = "oxys-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Attribute macros for oxys config files"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/oxydizer/oxys"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "visit-mut"] }

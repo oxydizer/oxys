@@ -54,12 +54,18 @@ fn compile_file(file: &Path) -> Result<()> {
         &oxys::compile::oxys_crate_path(),
         &std::env::current_dir()?,
     ) {
-        Ok(manifest) => {
+        Ok(outcome) => {
             println!("{}", "Compilation succeeded".green().bold());
+            for notice in &outcome.notices {
+                println!("{}", notice.yellow());
+            }
+            if let Ok(manifest) = load_manifest(&outcome.manifest_path) {
+                print_defaults_report(&manifest);
+            }
             println!(
                 "{} {}",
                 "Success:".green().bold(),
-                manifest.display().to_string().green()
+                outcome.manifest_path.display().to_string().green()
             );
             Ok(())
         }
@@ -81,13 +87,27 @@ fn report_manifest(manifest: &Path) -> Result<()> {
         )
         .into());
     }
-    let _ = load_manifest(manifest)?;
+    let parsed = load_manifest(manifest)?;
+    print_defaults_report(&parsed);
     println!(
         "{} {}",
         "Success:".green().bold(),
         manifest.display().to_string().green()
     );
     Ok(())
+}
+
+/// Show which notable settings are running on built-in defaults, so nothing
+/// opinionated is applied invisibly.
+fn print_defaults_report(manifest: &oxys::SystemManifest) {
+    let settings = oxys::defaults_report::defaulted_settings(manifest);
+    if settings.is_empty() {
+        return;
+    }
+    println!("{}", "Defaults in effect:".cyan());
+    for line in oxys::defaults_report::render_defaults_report(&settings) {
+        println!("  {}", line.dimmed());
+    }
 }
 
 fn print_command_output(stdout: &[u8], stderr: &[u8]) {

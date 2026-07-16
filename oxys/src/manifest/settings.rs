@@ -580,3 +580,69 @@ impl Default for Username {
         Self::Literal(String::new())
     }
 }
+
+/// IANA timezone for the installed system, applied as `/etc/localtime` and
+/// `/etc/timezone` on the target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Timezone {
+    /// A fixed zone name baked into the config, e.g. `"Europe/London"`.
+    Literal(String),
+    /// Picked interactively from the zoneinfo list by the installer at
+    /// install time.
+    Prompt,
+}
+
+impl Timezone {
+    /// The literal zone name, or an empty string for a still-unresolved
+    /// [`Timezone::Prompt`]. Install-time code may assume this is never
+    /// reached for `Prompt` because `plan_system_install` refuses to build a
+    /// plan while the timezone is unresolved.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Literal(zone) => zone.as_str(),
+            Self::Prompt => "",
+        }
+    }
+}
+
+impl Default for Timezone {
+    fn default() -> Self {
+        Self::Literal(String::new())
+    }
+}
+
+impl From<&str> for Timezone {
+    fn from(zone: &str) -> Self {
+        Self::Literal(zone.to_owned())
+    }
+}
+
+impl From<String> for Timezone {
+    fn from(zone: String) -> Self {
+        Self::Literal(zone)
+    }
+}
+
+// Hand-rolled serde keeps manifest.toml a plain string either way
+// (`timezone = "Europe/London"` / `timezone = "prompt"`), so manifests written
+// before this type existed still load. No IANA zone is named `prompt`, so the
+// sentinel cannot collide with a real literal.
+impl Serialize for Timezone {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Literal(zone) => serializer.serialize_str(zone),
+            Self::Prompt => serializer.serialize_str("prompt"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Timezone {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Ok(if raw == "prompt" {
+            Self::Prompt
+        } else {
+            Self::Literal(raw)
+        })
+    }
+}

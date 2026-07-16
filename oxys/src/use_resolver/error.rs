@@ -19,8 +19,14 @@ pub enum UseResolverError {
     InvalidPackageFileName { file_name: String },
     #[error("package identifier is invalid: {package}")]
     InvalidPackageIdentifier { package: String },
-    #[error("metadata file not found for package {package} at {path}")]
-    MetadataNotFound { package: String, path: PathBuf },
+    #[error("metadata file not found for package {package} at {path}{suggestion_note}")]
+    MetadataNotFound {
+        package: String,
+        path: PathBuf,
+        /// Preformatted `; did you mean '...'?` hint, empty when nothing close
+        /// is known (or the failure is about versions rather than spelling).
+        suggestion_note: String,
+    },
     #[error("missing required metadata field: {field}")]
     MissingField { field: &'static str },
     #[error("invalid metadata field {field}: {message}")]

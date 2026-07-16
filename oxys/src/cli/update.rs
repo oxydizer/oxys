@@ -19,7 +19,6 @@ use oxys::{
 use super::output::{fail_on_conflicts, print_plan};
 use super::update_report::write_update_report;
 
-const DEFAULT_PORTAGE_TREE: &str = "/var/db/repos";
 const SYSTEM_MANIFEST: &str = "/etc/oxys/current-manifest.toml";
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -295,9 +294,7 @@ fn print_world_update_plan(plan: &WorldUpdatePlan) {
 }
 
 fn effective_portage_tree() -> PathBuf {
-    std::env::var_os("OXYS_PORTAGE_TREE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_PORTAGE_TREE))
+    oxys::package_check::portage_tree_path()
 }
 fn effective_system_manifest_path() -> PathBuf {
     std::env::var_os("OXYS_SYSTEM_MANIFEST")

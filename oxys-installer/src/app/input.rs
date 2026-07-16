@@ -30,8 +30,19 @@ impl App {
             return false;
         }
 
-        // The username/password/custom-source screens capture every key so
-        // typed characters never reach the global shortcuts below.
+        // While wipe/rsync is running the worker cannot be cancelled safely.
+        // Swallow quit/back/navigation so we never leave Installing or start a
+        // second destructive run on top of the first.
+        if self.install_in_progress() {
+            return false;
+        }
+
+        // The timezone/username/password/custom-source screens capture every
+        // key so typed characters never reach the global shortcuts below.
+        if self.current == Screen::Timezone {
+            self.timezone_key(key);
+            return false;
+        }
         if self.current == Screen::Usernames {
             self.username_key(key);
             return false;
@@ -225,8 +236,11 @@ impl App {
                 self.package_scroll = 0;
                 Screen::PackageSummary
             }
+            Screen::Timezone => Screen::Confirm,
             Screen::Usernames => Screen::Confirm,
             Screen::Passwords => Screen::Confirm,
+            // Only reachable when the worker has finished (failed run); a live
+            // install is locked out in on_key via install_in_progress().
             Screen::Installing => Screen::Confirm,
             Screen::Done => Screen::Installing,
         };
@@ -267,6 +281,9 @@ impl App {
                     Screen::CustomSource
                 } else {
                     // Gate: compile the selected config before continuing.
+                    // Always land on ConfigValidate so the step is visible;
+                    // unedited stock profiles finish almost immediately via
+                    // the ISO prebuilt (see start_config_compile).
                     self.start_config_compile();
                     Screen::ConfigValidate
                 }
@@ -287,8 +304,9 @@ impl App {
                     self.begin_identity_collection()
                 }
             }
-            // Enter on the username/password screens is handled by
-            // username_key/password_key, not here.
+            // Enter on the timezone/username/password screens is handled by
+            // timezone_key/username_key/password_key, not here.
+            Screen::Timezone => Screen::Timezone,
             Screen::Usernames => Screen::Usernames,
             Screen::Passwords => Screen::Passwords,
             Screen::Installing => Screen::Installing,

@@ -24,8 +24,8 @@ pub use crate::manifest::{
     Ext4Options, GB, Gpu, GpuVendor, Graphics, Hardware, InitSystem, Journal, JournalStorage,
     Kernel, Libc, LoginFrontend, MB, MakeOpts, March, MesaGraphics, Nvidia, NvidiaDriver, Os, Oxys,
     Package, Password, Power, PrimeMode, SeatBackend, Services, Session, SessionMode,
-    SessionTracker, SessionUser, Shell, SoftwareRenderer, Subvolume, SwapConfig, User, Username,
-    VideoCard, VideoCards, VmGraphics, ZfsCanmount, ZfsDataset, ZfsOptions,
+    SessionTracker, SessionUser, Shell, SoftwareRenderer, Subvolume, SwapConfig, Timezone, User,
+    Username, VideoCard, VideoCards, VmGraphics, ZfsCanmount, ZfsDataset, ZfsOptions,
 };
 pub use crate::session::{
     DecisionSource, ResolvedSession, ResolvedSessionMode, SessionDecision, SessionPolicy,

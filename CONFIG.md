@@ -8,6 +8,36 @@ In Oxys OS, the system configuration is defined as a pure Rust DSL using the [Sy
 
 ## Configuration Overview
 
+A config is a standalone Rust program (`.fe2o3`) whose config function is marked `#[oxys::config]`:
+
+```rust
+use oxys::prelude::*;
+
+#[oxys::config]
+pub fn config() -> Oxys {
+    Oxys {
+        os: Os {
+            hostname: "oxys".into(),
+        },
+        packages: vec![
+            Package::new("net-misc/curl"),
+        ],
+    }
+}
+```
+
+The attribute does two things:
+
+1. **Auto-defaults** — every struct literal may omit any field; a trailing `..Default::default()` is filled in automatically. Struct literals that already carry an explicit `..` spread are left untouched. The one exception is enum struct variants (e.g. `LoginFrontend::OxysLogin { tty: 1, fallback_tty_login: true }`), which Rust requires to be fully spelled out.
+2. **Entry point** — it generates the program's `main`, so no footer is needed.
+
+`oxys compile` prints a **"Defaults in effect"** report listing the notable settings that are running on their built-in defaults (compiler flags, binhost, init system, bootloader, session, disk layout/swap), so nothing opinionated is applied invisibly. It also validates every declared package atom against the Portage tree and fails with a *did-you-mean* suggestion for unknown names (skipped with a notice on machines without a Portage tree).
+
+> [!NOTE]
+> The legacy form — explicit `..Default::default()` spreads plus a
+> `oxys::main!(config);` footer instead of the attribute — remains fully
+> supported.
+
 The root of any Oxys configuration is [SystemManifest](oxys/src/manifest.rs#L14-L45) (alias [Oxys](oxys/src/manifest.rs#L47)).
 
 ```rust
@@ -42,8 +72,8 @@ The `os` block specifies high-level system parameters like hostname, locales, sh
 
 | Field | Type | Default | Description | Status |
 | :--- | :--- | :--- | :--- | :--- |
-| `hostname` | `String` | `""` | The system hostname. | 🚧 **Coming Soon** (Parsed/validated but not written to target `/etc/hostname`) |
-| `timezone` | `String` | `""` | Timezone (e.g., `"Europe/London"`). | 🚧 **Coming Soon** (Parsed/validated but not written to `/etc/localtime`) |
+| `hostname` | `String` | `""` | The system hostname. | 🟢 **Fully Implemented** (written to `/etc/hostname` and `/etc/conf.d/hostname`) |
+| `timezone` | [Timezone](oxys/src/manifest/settings.rs) | `""` | IANA timezone: `"Europe/London".into()`, or `Timezone::Prompt` to pick from a searchable zoneinfo list in the installer. Literal zones are validated against the source image before any disk work. | 🟢 **Fully Implemented** (written to `/etc/timezone`, symlinked as `/etc/localtime`) |
 | `locale` | `String` | `""` | System locale (e.g., `"en_US.UTF-8"`). | 🚧 **Coming Soon** (Parsed/validated but not written to `/etc/locale.gen`) |
 | `shell` | [Shell](oxys/src/manifest.rs#L714-L718) | `Shell::Bash` | Default system shell (`Bash`, `Zsh`, `Fish`). | 🚧 **Coming Soon** (Parsed/validated but not yet provisioned/configured) |
 | `libc` | [Libc](oxys/src/manifest.rs#L676-L678) | `Libc::Glibc` | The system C library (`Glibc`). | 🟢 **Fully Implemented** |
@@ -58,7 +88,7 @@ The `disk` block defines storage devices, filesystems, subvolumes, swap configur
 | Field | Type | Default | Description | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | `device` | `String` | `""` | Target block device (e.g., `"/dev/nvme0n1"`). | 🟢 **Fully Implemented** |
-| `layout` | [DiskLayout](oxys/src/manifest.rs#L728-L733) | `DiskLayout::Btrfs` | Filesystem layout (`Btrfs`, `LuksBtrfs`, `Zfs`, `Ext4`). | 🟢 **Zfs / Ext4 Fully Implemented**<br>⚠️ **Btrfs / LuksBtrfs: Coming Soon** (modeled, but rejected by the executor for now) |
+| `layout` | [DiskLayout](oxys/src/manifest.rs#L728-L733) | `DiskLayout::Ext4` | Filesystem layout (`Btrfs`, `LuksBtrfs`, `Zfs`, `Ext4`). | 🟢 **Zfs / Ext4 Fully Implemented**<br>⚠️ **Btrfs / LuksBtrfs: Coming Soon** (modeled, but rejected by the executor for now) |
 | `encryption` | [Encryption](oxys/src/manifest.rs#L743-L750) | `Encryption::None` | Disk encryption strategy (`None`, `Password`, `Tpm`). | 🟢 **None: Fully Implemented**<br>⚠️ **Password / Tpm: Coming Soon** (modeled, but installer fails early if set, to prevent plain text leaks) |
 | `subvolumes` | `Vec<Subvolume>` | Standard subvolumes | Btrfs-style subvolumes or ZFS datasets. | 🟢 **Fully Implemented** (automatically maps `@` to datasets/mounts) |
 | `partitions` | [DiskPartitions](oxys/src/manifest.rs#L237-L242) | EFI (512MB) + Swap (zram) | Boot and swap partitions details. | 🟢 **Fully Implemented** |
@@ -260,7 +290,8 @@ Maps to `/etc/portage/make.conf` compilation optimization variables.
 | :--- | :--- | :--- | :--- | :--- |
 | `cflags` | `String` | `"-O2 -pipe"` | Base C compiler flags (`-march` is appended from `march`). | 🟢 **Fully Implemented** |
 | `cxxflags` | `String` | `"-O2 -pipe"` | Base C++ compiler flags (`-march` is appended from `march`). | 🟢 **Fully Implemented** |
-| `march` | [March](oxys/src/manifest.rs#L76-L91) | `March::Native` | Target CPU microarchitecture level, appended as `-march=` to CFLAGS/CXXFLAGS (`Native`, `X86_64`, `X86_64V2`, `X86_64V3`, `X86_64V4`). Any `-march` in `cflags`/`cxxflags` is overridden. | 🟢 **Fully Implemented** |
+| `march` | [March](oxys/src/manifest/compiler.rs#L26-L37) | `March::X86_64V3` | Target CPU microarchitecture level, appended as `-march=` to CFLAGS/CXXFLAGS (`Native`, `X86_64`, `X86_64V2`, `X86_64V3`, `X86_64V4`). Any `-march` in `cflags`/`cxxflags` is overridden. `Native` disables the binhost (no official binaries exist for a machine-specific march). | 🟢 **Fully Implemented** |
+| `binhost` | `Option<String>` | Gentoo official binhost for `march` | Binary package host queried with `--getbinpkg` before building from source. `None` disables binpkg fetching. | 🟢 **Fully Implemented** |
 | `ldflags` | `String` | `"-fuse-ld=mold"` | Linker flags. | 🟢 **Fully Implemented** |
 | `makeopts_jobs` | `usize` | Detect CPU count | Number of parallel make jobs. | 🟢 **Fully Implemented** |
 | `emerge_jobs` | `usize` | `2` | Number of parallel emerge packages. | 🟢 **Fully Implemented** |

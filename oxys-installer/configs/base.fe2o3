@@ -1,13 +1,13 @@
 use oxys::prelude::*;
 
+#[oxys::config]
 pub fn config() -> Oxys {
     Oxys {
         os: Os {
             hostname: "OxysOS".into(),
-            timezone: "Europe/London".into(),
+            // Picked from the zoneinfo list by the installer at install time.
+            timezone: Timezone::Prompt,
             locale: "en_US.UTF-8".into(),
-            shell: Shell::Bash,
-            libc: Libc::Glibc,
         },
         disk: Disk {
             // Whole-disk ext4: EFI system partition + a single ext4 root
@@ -15,9 +15,7 @@ pub fn config() -> Oxys {
             layout: DiskLayout::Ext4,
             ext4: Ext4Options {
                 separate_home: false,
-                ..Default::default()
             },
-            ..Default::default()
         },
         hardware: Hardware {
             graphics: detect_graphics(),
@@ -30,7 +28,6 @@ pub fn config() -> Oxys {
         init_system: InitSystem::Openrc,
         session: Session {
             mode: SessionMode::Text,
-            ..Default::default()
         },
         prefer_binary: true,
         packages: vec![
@@ -45,8 +42,5 @@ pub fn config() -> Oxys {
             enabled: ["NetworkManager", "sshd"],
             disabled: ["lvm2-monitor", "multipathd"],
         },
-        ..Default::default()
     }
 }
-
-oxys::main!(config);

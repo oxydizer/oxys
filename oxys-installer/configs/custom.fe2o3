@@ -1,13 +1,13 @@
 use oxys::prelude::*;
 
+#[oxys::config]
 pub fn config() -> Oxys {
     Oxys {
         os: Os {
             hostname: "OxysOS".into(),
-            timezone: "Europe/London".into(),
+            // Picked from the zoneinfo list by the installer at install time.
+            timezone: Timezone::Prompt,
             locale: "en_US.UTF-8".into(),
-            shell: Shell::Bash,
-            libc: Libc::Glibc,
         },
         hardware: Hardware {
             graphics: detect_graphics(),
@@ -22,7 +22,6 @@ pub fn config() -> Oxys {
         // login behaviour explicit even though it includes desktop packages.
         session: Session {
             mode: SessionMode::Text,
-            ..Default::default()
         },
         prefer_binary: true,
         packages: vec![
@@ -42,8 +41,5 @@ pub fn config() -> Oxys {
             enabled: ["dbus", "seatd", "NetworkManager", "sshd"],
             disabled: ["lvm2-monitor", "multipathd"],
         },
-        ..Default::default()
     }
 }
-
-oxys::main!(config);

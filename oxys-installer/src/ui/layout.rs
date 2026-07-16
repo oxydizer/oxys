@@ -187,9 +187,22 @@ pub(super) fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             ("m", "view manifest"),
             ("esc", "back"),
         ],
+        Screen::Timezone => vec![
+            ("type", "filter"),
+            ("↑↓", "move"),
+            ("enter", "select"),
+            ("esc", "back"),
+        ],
         Screen::Usernames => vec![("type", "username"), ("enter", "confirm"), ("esc", "back")],
         Screen::Passwords => vec![("type", "password"), ("enter", "confirm"), ("esc", "back")],
-        Screen::Partition | Screen::Installing => vec![("wait", "running")], // Partition hidden for now
+        // Partition hidden for now. While the worker is live, no Esc/q — the
+        // wipe cannot be cancelled safely. After a failed run the channel is
+        // gone and the user can leave.
+        Screen::Installing if app.install_in_progress() => {
+            vec![("wait", "running — do not interrupt")]
+        }
+        Screen::Installing => vec![("esc", "back"), ("q", "quit")],
+        Screen::Partition => vec![("wait", "running")],
         Screen::Done => vec![("q", "exit")],
     };
 

@@ -76,8 +76,33 @@ fn extend_repo_roots_from_config(repo_roots: &mut Vec<PathBuf>, contents: &str) 
     }
 }
 
-fn is_repo_root(path: &Path) -> bool {
+pub(crate) fn is_repo_root(path: &Path) -> bool {
     path.join("metadata").join("md5-cache").is_dir()
+}
+
+/// All category directories under a repo root's `metadata/md5-cache`.
+pub(crate) fn list_categories(repo_root: &Path) -> Vec<String> {
+    let cache_dir = repo_root.join("metadata").join("md5-cache");
+    match fs::read_dir(&cache_dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// All `<name>-<version>` cache entries within one category of a repo root.
+pub(crate) fn list_category_entries(repo_root: &Path, category: &str) -> Vec<String> {
+    let category_dir = repo_root.join("metadata").join("md5-cache").join(category);
+    match fs::read_dir(&category_dir) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
 
 fn push_unique_path(paths: &mut Vec<PathBuf>, path: PathBuf) {

@@ -83,6 +83,13 @@ rm -rf "${OVERLAY_OXYS_SRC}"
 mkdir -p "${OVERLAY_OXYS_SRC}/src"
 cp -a "${OXYS_CRATE_SRC}/src/." "${OVERLAY_OXYS_SRC}/src/"
 
+# The nested oxys-macros proc-macro crate (#[oxys::config]) is a `path =
+# "macros"` dependency of oxys, so it must travel with the staged source —
+# cargo vendor only covers registry deps, path deps must exist on disk.
+mkdir -p "${OVERLAY_OXYS_SRC}/macros/src"
+cp -a "${OXYS_CRATE_SRC}/macros/src/." "${OVERLAY_OXYS_SRC}/macros/src/"
+cp "${OXYS_CRATE_SRC}/macros/Cargo.toml" "${OVERLAY_OXYS_SRC}/macros/Cargo.toml"
+
 # oxys/Cargo.toml already pins its own dependency versions literally (no
 # `{ workspace = true }`) specifically so it can be copied as-is here. The only
 # thing it can't carry over is workspace membership: appending an empty

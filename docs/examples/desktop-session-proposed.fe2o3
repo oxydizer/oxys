@@ -6,23 +6,20 @@
 
 use oxys::prelude::*;
 
+#[oxys::config]
 pub fn config() -> Oxys {
     Oxys {
         os: Os {
             hostname: "oxys".into(),
             timezone: "Pacific/Auckland".into(),
             locale: "en_NZ.UTF-8".into(),
-            shell: Shell::Bash,
-            libc: Libc::Glibc,
         },
 
         disk: Disk {
             layout: DiskLayout::Ext4,
             ext4: Ext4Options {
                 separate_home: false,
-                ..Default::default()
             },
-            ..Default::default()
         },
 
         hardware: Hardware {
@@ -62,7 +59,6 @@ pub fn config() -> Oxys {
 
         compiler: Compiler {
             march: March::X86_64V3,
-            ..Default::default()
         },
 
         kernel: Kernel {
@@ -89,7 +85,6 @@ pub fn config() -> Oxys {
             desktop_shell: Some(DesktopShell::Noctalia),
             seat: SeatBackend::Seatd,
             session_tracker: SessionTracker::Elogind,
-            ..Default::default()
         },
 
         packages: vec![
@@ -134,9 +129,5 @@ pub fn config() -> Oxys {
                 .shell(Shell::Bash)
                 .password(Password::Prompt),
         ],
-
-        ..Default::default()
     }
 }
-
-oxys::main!(config);

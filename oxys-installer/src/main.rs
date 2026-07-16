@@ -10,6 +10,7 @@ use ratatui::{prelude::*, Terminal};
 mod app;
 mod hardware;
 mod network;
+mod prebuilt;
 mod provisioning;
 mod ui;
 

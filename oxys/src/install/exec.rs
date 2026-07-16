@@ -64,6 +64,11 @@ fn run_step(
             target_mount,
             ..
         } => filesystem::write_hostname(hostname, target_mount)?,
+        SystemInstallStep::ConfigureTimezone {
+            timezone,
+            target_mount,
+            ..
+        } => filesystem::write_timezone(timezone, target_mount)?,
         SystemInstallStep::SetupUsers {
             users,
             target_mount,
@@ -133,6 +138,12 @@ fn run_step(
             drivers,
             ..
         } => boot::generate_initramfs(target_mount, kver, drivers, sender)?,
+        SystemInstallStep::SeedOxysConfig {
+            source_fe2o3,
+            manifest,
+            target_mount,
+            ..
+        } => filesystem::seed_oxys_config(source_fe2o3.as_deref(), manifest, target_mount)?,
         SystemInstallStep::Finalize {
             manifest,
             target_mount,

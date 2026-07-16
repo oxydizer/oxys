@@ -75,6 +75,10 @@ pub(crate) enum Screen {
     /// successful compile and the final confirm gate.
     PackageSummary,
     Confirm,
+    /// Interactive timezone picker for configs declaring `Timezone::Prompt`.
+    /// Reached from Confirm before any account prompts, with a
+    /// filter-as-you-type list built from the live ISO's zoneinfo.
+    Timezone,
     /// Interactive username entry for users declaring `Username::Prompt`.
     /// Reached from Confirm only when the compiled manifest has such users,
     /// and always resolved before `Passwords` (the password screen displays
@@ -100,11 +104,15 @@ impl Screen {
             | Screen::CustomSource
             | Screen::ConfigValidate
             | Screen::ConfigError => 3,
-            // Usernames/Passwords are sub-states between confirm and install;
-            // they share the confirm step marker on the rail. PackageSummary
-            // is the review beat leading into confirm, so it shares that
-            // marker too.
-            Screen::PackageSummary | Screen::Confirm | Screen::Usernames | Screen::Passwords => 4,
+            // Timezone/Usernames/Passwords are sub-states between confirm and
+            // install; they share the confirm step marker on the rail.
+            // PackageSummary is the review beat leading into confirm, so it
+            // shares that marker too.
+            Screen::PackageSummary
+            | Screen::Confirm
+            | Screen::Timezone
+            | Screen::Usernames
+            | Screen::Passwords => 4,
             Screen::Installing => 5,
             Screen::Done => 6,
         }
@@ -113,7 +121,7 @@ impl Screen {
 
 /// Result of an asynchronous config compilation.
 pub(crate) enum CompileEvent {
-    Done(Result<std::path::PathBuf, oxys::compile::CompileError>),
+    Done(Result<oxys::compile::CompileOutcome, oxys::compile::CompileError>),
 }
 
 pub(crate) struct App {
@@ -166,6 +174,8 @@ pub(crate) struct App {
     // --- config compilation / validation gate ---
     pub(crate) compiling: bool,
     pub(crate) compile_error: Option<oxys::compile::CompileError>,
+    pub(crate) compile_notices: Vec<String>,
+    pub(crate) defaults_report: Vec<String>,
     pub(crate) compile_scroll: usize,
     pub(crate) confirm_view_manifest: bool,
     pub(crate) manifest_scroll: usize,
@@ -177,6 +187,12 @@ pub(crate) struct App {
     // --- package source summary (binary vs. from-source), shown post-compile ---
     pub(crate) package_summary: Option<oxys::PackageSummary>,
     pub(crate) package_scroll: usize,
+    // --- interactive timezone picker (Timezone::Prompt configs), resolved
+    // before any account prompts ---
+    pub(crate) timezone_choices: Vec<String>,
+    pub(crate) timezone_filter: String,
+    pub(crate) timezone_cursor: usize,
+    collected_timezone: Option<String>,
     // --- interactive username collection (Username::Prompt users), resolved
     // before password collection since the password screen displays and keys
     // off the resolved name ---
@@ -236,6 +252,8 @@ impl App {
             pending_edit: None,
             compiling: false,
             compile_error: None,
+            compile_notices: Vec::new(),
+            defaults_report: Vec::new(),
             compile_scroll: 0,
             confirm_view_manifest: false,
             manifest_scroll: 0,
@@ -246,6 +264,10 @@ impl App {
             compile_task: None,
             package_summary: None,
             package_scroll: 0,
+            timezone_choices: Vec::new(),
+            timezone_filter: String::new(),
+            timezone_cursor: 0,
+            collected_timezone: None,
             prompt_username_indices: Vec::new(),
             username_idx: 0,
             username_input: String::new(),
@@ -308,6 +330,15 @@ impl App {
 
     pub(crate) fn selected_config(&self) -> &'static str {
         ["desktop", "base", "custom"][self.config_idx]
+    }
+
+    /// True while the install worker still owns the progress/log channel.
+    ///
+    /// Used to lock Esc/quit/re-start: `JoinHandle::abort` does not stop a
+    /// `spawn_blocking` wipe/rsync mid-flight, so the UI must refuse to leave
+    /// or re-enter until the worker disconnects on its own.
+    pub(crate) fn install_in_progress(&self) -> bool {
+        self.install_rx.is_some()
     }
 
     pub(crate) fn step_labels() -> [&'static str; 7] {

@@ -4,12 +4,12 @@ mod error;
 mod generate;
 mod parse;
 mod path;
-mod repo;
+pub(crate) mod repo;
 mod resolver;
 mod rules;
 mod types;
 mod update;
-mod util;
+pub(crate) mod util;
 mod version;
 
 pub use crate::manifest::{

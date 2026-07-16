@@ -2,6 +2,7 @@ use std::path::Path;
 
 use colored::Colorize;
 use oxys::{
+    SystemManifest,
     diff::{PackageChange, diff_packages},
     runtime::sync_runtime_config,
     use_resolver::{apply_portage_plan, emerge_depclean_pretend, emerge_deselect, emerge_select},
@@ -22,6 +23,15 @@ use crate::{
 pub(crate) fn run() -> Result<()> {
     let desired_path = Path::new(LOCAL_MANIFEST);
     let desired = load_manifest(desired_path)?;
+    apply_manifest(desired)
+}
+
+/// Apply an already-loaded desired manifest to the running system: resolve the
+/// graphics policy, diff against the current applied state, run the Portage plan,
+/// reconcile `@world`/runtime config, and persist the new state to
+/// `current-manifest.toml`. Shared by `oxys apply` (which loads the cwd
+/// `manifest.toml`) and `oxys install` (which compiles it from the source config).
+pub(crate) fn apply_manifest(desired: SystemManifest) -> Result<()> {
     let root = effective_root();
     let resolved_graphics = desired
         .resolved_graphics()?

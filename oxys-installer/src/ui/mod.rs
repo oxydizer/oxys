@@ -26,6 +26,7 @@ use screens::{
     draw_install,
     draw_package_summary,
     draw_passwords,
+    draw_timezone,
     draw_usernames,
     draw_welcome,
     // draw_partition,  // step 4 hidden for now
@@ -65,9 +66,16 @@ pub(crate) fn draw_ui(frame: &mut Frame, app: &App) {
         Screen::ConfigError => draw_config_error(frame, body, app),
         Screen::PackageSummary => draw_package_summary(frame, body, app),
         Screen::Confirm => draw_confirm(frame, body, app),
+        Screen::Timezone => draw_timezone(frame, body, app),
         Screen::Usernames => draw_usernames(frame, body, app),
         Screen::Passwords => draw_passwords(frame, body, app),
-        Screen::Installing => draw_install(frame, body, &app.install_lines, app.install_progress),
+        Screen::Installing => draw_install(
+            frame,
+            body,
+            &app.install_lines,
+            app.install_progress,
+            app.hardware_spinner_idx,
+        ),
         Screen::Done => draw_done(frame, body),
     }
 

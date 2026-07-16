@@ -1,5 +1,3 @@
-use std::fs;
-
 use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::{
@@ -137,27 +135,9 @@ impl App {
                     self.compiling = false;
                     self.compile_rx = None;
                     match result {
-                        Ok(path) => {
-                            match fs::read_to_string(&path) {
-                                Ok(text) => {
-                                    self.manifest_text = Some(text);
-                                    self.manifest_read_error = None;
-                                }
-                                Err(err) => {
-                                    self.manifest_text = None;
-                                    self.manifest_read_error =
-                                        Some(format!("failed to read {}: {err}", path.display()));
-                                }
-                            }
-                            // Classify the compiled manifest's packages for the
-                            // review screen. Pure/cheap: manifest only, no
-                            // network or Portage tree. On load failure we simply
-                            // show no summary rather than block the install.
-                            self.package_summary = oxys::compile::load_manifest(&path)
-                                .ok()
-                                .map(|manifest| oxys::summarize(&manifest));
-                            self.package_scroll = 0;
-                            self.compiled_manifest = Some(path);
+                        Ok(outcome) => {
+                            self.compile_notices = outcome.notices;
+                            self.accept_compiled_manifest(outcome.manifest_path);
                             if self.current == Screen::ConfigValidate {
                                 self.current = Screen::PackageSummary;
                             }
@@ -209,7 +189,11 @@ impl App {
 
     pub(crate) fn on_tick(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
-        if self.hardware_detecting || self.compiling || self.custom_fetching {
+        if self.hardware_detecting
+            || self.compiling
+            || self.custom_fetching
+            || self.current == Screen::Installing
+        {
             self.hardware_spinner_idx = (self.hardware_spinner_idx + 1) % SPINNER.len();
         }
         if self.network_online.is_none() {

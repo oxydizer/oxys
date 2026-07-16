@@ -10,6 +10,17 @@ pub fn apply_disk_plan(plan: &DiskPlan) -> ProvisionStream {
 }
 
 fn run_plan(plan: DiskPlan, sender: Sender<ProvisionEvent>) -> Result<(), DiskError> {
+    // Last-second re-check: the UI may have sat on Confirm for a while, or
+    // another process may have mounted/swapped the disk after the first
+    // preflight. Fail before wipefs rather than mid-partition.
+    if let Err(error) = super::preflight::preflight_device(&plan.device) {
+        let _ = sender.send(StepEvent::Error {
+            step: "preflight".to_owned(),
+            message: error.to_string(),
+        });
+        return Err(error);
+    }
+
     for step in &plan.steps {
         if let Err(error) = exec::run_command_step(step, &sender).map_err(DiskError::from) {
             let _ = sender.send(StepEvent::Error {

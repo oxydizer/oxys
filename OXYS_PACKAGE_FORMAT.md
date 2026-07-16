@@ -1,8 +1,8 @@
 # `.oxys` Package Format and Fast ISO Composition Plan
 
-Status: design proposal, not yet implemented  
+Status: design proposal, not yet implemented
 Primary use case: build the OxysOS live ISO without emerging the desktop and
-installer package closure on every ISO build  
+installer package closure on every ISO build
 Secondary use case: install and update Oxys-native prebuilt packages while
 retaining Portage as the Gentoo compatibility and source-build backend
 
@@ -11,6 +11,13 @@ retaining Portage as the Gentoo compatibility and source-build backend
 Add `.oxys` as an **immutable binary package format**, not as a replacement for
 ebuilds or Portage.
 
+Portage's VDB (`/var/db/pkg/`) is the **single source of truth** for every
+installed package — both Gentoo-derived and native Oxys packages. The `.oxys`
+composer writes real, complete VDB entries so the installed system is
+indistinguishable from one built by `emerge`. Oxys keeps a lightweight
+plain-file sidecar recording which packages it installed via `.oxys` artifacts,
+but this is informational — VDB is authoritative.
+
 The first useful release should do the following:
 
 1. Compile the existing Rust system configuration into `manifest.toml` as it
@@ -18,14 +25,12 @@ The first useful release should do the following:
 2. Resolve the requested live-image package set against a signed Oxys repository
    index and write an `oxys.lock` containing exact package builds and hashes.
 3. Fetch prebuilt `.oxys` artifacts and compose them into a stage3-derived root.
-4. Preserve file ownership and, for artifacts converted from Gentoo packages,
-   preserve enough Portage VDB metadata that Portage still understands what is
-   installed.
+4. Write complete Portage VDB entries captured from the reference build so that
+   Portage fully understands what is installed.
 5. Hand that already-composed root to catalyst for the ISO-only work: kernel
    injection, live initramfs, squashfs and ISO generation.
-6. Continue to delegate packages absent from the Oxys repository, packages with
-   custom USE flags, and explicitly source-built packages to the existing
-   Portage planner and `emerge` runner.
+6. For packages absent from the Oxys repository, prompt the user and let them
+   choose: check the binhost, build from source, or skip.
 
 Use **Resolvo** for the `.oxys` artifact graph. It has a generic package-manager
 interface, supports lazy metadata loading and is designed around a CDCL SAT
@@ -40,8 +45,7 @@ the same fixture corpus before committing the lockfile schema to it.
 This proposal deliberately does **not** use Resolvo to replace Portage's solver.
 Portage dependency expressions include SLOT/sub-slot operators, blockers,
 USE-conditional dependencies, repository/profile state and rebuild semantics.
-For the first releases, Portage remains authoritative for the Gentoo graph;
-Resolvo is authoritative only for published `.oxys` artifacts.
+Portage remains authoritative for any package that goes through `emerge`.
 
 Relevant upstream material:
 
@@ -90,29 +94,22 @@ The relevant existing integration points are:
 The proposed path becomes:
 
 ```text
-                         +-----------------------------+
-Rust config              | Gentoo package not present, |
-  -> manifest.toml       | source forced, or custom USE|
-  -> unified planner ----+----------> PortagePlan -----> emerge
+Rust config
+  -> manifest.toml
+  -> resolve against .oxys repository
           |
-          v
-    Oxys repository index
+          +---> all dependencies satisfied
+          |       |
+          |       v
+          |     oxys.lock -> fetch -> compose root -> catalyst stage2
           |
-          v
-      Resolvo solve
-          |
-          v
-       oxys.lock
-          |
-          v
- fetch + verify `.oxys` artifacts
-          |
-          v
- transactional root composition
-          |
-          +----> live ISO root ----> catalyst stage2
-          |
-          +----> installed system (later phase)
+          +---> missing dependency
+                  |
+                  v
+                prompt user: binhost / source / skip
+                  |
+                  v
+                emerge for that package
 ```
 
 ## Goals
@@ -122,11 +119,12 @@ Rust config              | Gentoo package not present, |
 - Keep the Rust DSL as the user-facing declaration of the desired system.
 - Produce a deterministic lockfile so an ISO can be recreated from the same
   repository snapshot and artifact hashes.
+- Preserve Portage VDB as the single authoritative package database. A system
+  composed via `.oxys` must be indistinguishable from one built by `emerge`.
+- Users can run `emerge -uDN @world` at any time without breaking anything.
 - Support atomic-enough install, upgrade and rollback behavior: a failed
   package must not leave an untracked half-install behind.
 - Preserve package/file ownership and detect collisions before mutating a root.
-- Preserve Portage as a supported backend for arbitrary Gentoo packages,
-  custom USE configurations and source builds.
 - Make architecture, CPU baseline, libc, init system, ABI and kernel coupling
   explicit compatibility dimensions.
 - Support offline ISO builds after repository metadata and artifacts have been
@@ -138,6 +136,8 @@ Rust config              | Gentoo package not present, |
 - Reimplementing all of Portage's dependency solver.
 - Replacing ebuilds as the way Gentoo-derived packages are built.
 - Executing arbitrary package scripts as root from downloaded archives.
+- Automatic fallback logic between resolvers. If a dependency is missing from
+  the `.oxys` repo, the user decides what to do.
 - Supporting multiple installed versions/slots of every native package on day
   one. The metadata can represent slots, but the first installer may reject
   multiple selected instances unless explicitly supported.
@@ -276,6 +276,10 @@ offset  size  field
 ...     P     zstd-compressed deterministic tar payload
 ```
 
+The implemented package MVP assigns flag bit 0 to `hardlinks-present`. Readers
+reject unknown flag bits and reject a mismatch between this bit and type `4`
+file-table records.
+
 Rules:
 
 - Major-version mismatch is a hard error. Unknown optional minor fields can be
@@ -288,10 +292,13 @@ Rules:
   rejected.
 - Device nodes, setuid/setgid bits, capabilities and special files require
   explicit metadata permission and repository policy; the MVP can reject them.
-- UID/GID are numeric. The package may also declare required system users/groups
-  separately so IDs can be allocated consistently before extraction.
+- UID/GID in the payload are numeric. The metadata separately declares required
+  system users/groups by name so IDs can be allocated or mapped consistently
+  before extraction (see "UID/GID handling" below).
 - mtime is normalized for reproducibility; runtime-mutated state does not belong
   in a package payload.
+- Extended attributes, ACLs, Linux capabilities and hardlink relationships must
+  be representable in the file table to accurately reproduce a real root.
 
 A framed format is slightly more implementation work than `tar.zst`, but it
 allows cheap metadata inspection, safe size checks and future compression
@@ -345,9 +352,15 @@ version = "1"
 name = "gentoo/gui-wm/niri"
 constraint = "<25.11"
 
+[[system_users]]
+name = "niri"
+group = "niri"
+home = "/var/empty"
+shell = "/sbin/nologin"
+
 [build]
 builder = "oxys-build"
-source = "portage"
+method = "portage-source"
 repo = "gentoo"
 repo_commit = "..."
 ebuild = "gui-wm/niri-25.11-r1.ebuild"
@@ -357,7 +370,6 @@ compiler = "gcc"
 cflags = "-O2 -pipe -march=x86-64-v3"
 
 [portage]
-compatible = true
 category = "gui-wm"
 pf = "niri-25.11-r1"
 repository = "gentoo"
@@ -370,21 +382,43 @@ but only the fields that affect selection belong in the solver's hot index.
 
 ### File table
 
-The file table is canonical, sorted bytewise by normalized path and records:
+The file table is canonical, sorted by raw UTF-8 path bytes (never locale-aware)
+and records:
 
 ```text
-type | mode | uid | gid | size | sha256 | path | symlink-target
+type | mode | uid | gid | size | sha256 | path | symlink-target | xattrs | hardlink-group
 ```
+
+In the implemented MVP binary table, types are `1=file`, `2=directory`,
+`3=symlink`, and `4=hardlink`; the variable target field stores either symlink
+text or the package-relative canonical path for a hardlink. The bytewise-lowest
+path in an inode group is the canonical regular file, and every alias points
+directly to it. Hardlink records carry the canonical content size and SHA-256
+but no inline tar data; the tar entry uses POSIX type `1`.
 
 It serves four purposes:
 
 - validate the payload before commit;
 - preflight collisions without extracting into the live root;
-- populate the ownership database;
+- populate the Oxys receipt and verify against VDB CONTENTS;
 - verify and repair installed files later.
 
 Do not infer ownership by scanning the final root after installation. Generated
 runtime files should be handled by typed triggers and recorded separately.
+
+### UID/GID handling
+
+Numeric UID/GID baked into artifacts from a build environment will not
+necessarily match the target system's allocations. The metadata declares
+required system users/groups by name in `[[system_users]]`. During composition:
+
+1. Create or verify required system users/groups before extraction.
+2. Map numeric IDs in the payload to the target system's allocations.
+3. Record the mapping in the transaction for reproducibility.
+
+For the ISO composition case where the entire root is being built fresh, the
+composer controls user allocation and can use a fixed Oxys system-ID registry
+to keep IDs stable across builds.
 
 ### Trust and signatures
 
@@ -439,68 +473,54 @@ cpu = "x86-64-v3"
 id = "gentoo/gui-wm/niri@25.11-r1#2:0"
 artifact = "sha256:..."
 payload = "sha256:..."
-source = "oxys"
 reason = ["root:live-desktop"]
 
 [[package]]
 id = "gentoo/app-editors/neovim@0.11.1:0"
-source = "portage"
-atom = "=app-editors/neovim-0.11.1"
+artifact = "sha256:..."
+payload = "sha256:..."
 reason = ["root:user-config"]
 ```
 
-The lockfile may contain Portage fallbacks, but those entries are only fully
-reproducible if the Portage repository commit, profile, USE state and distfile
-hashes are also pinned. `oxys lock --frozen` must fail instead of changing any
-selection. ISO release builds always use frozen mode.
+The lockfile contains only `.oxys` artifact references. Packages installed
+via Portage (because the user chose binhost or source when prompted) are not
+in the lockfile — they are tracked by VDB alone. This keeps the lockfile
+fully reproducible: every entry has an exact artifact digest.
+
+`oxys lock --frozen` must fail instead of changing any selection. ISO release
+builds always use frozen mode. A frozen build with missing dependencies is a
+build error, not a prompt — the repo must be complete for the declared closure.
 
 ## Rust declarative configuration
 
 ### Preserve the existing package API
 
 Existing configurations using `Package::new("cat/pkg")` must continue to work.
-Extend `Package` with a backend preference rather than create a second package
-list:
+The `prefer_binary` and `from_source()` mechanisms remain. When an `.oxys`
+repository is configured, the planner checks it first. No new `PackageBackend`
+enum is needed — the behavior is:
 
-```rust
-pub enum PackageBackend {
-    Auto,               // Oxys if an exact compatible artifact exists, else Portage
-    OxysOnly,           // fail if no compatible .oxys artifact exists
-    PortageBinaryFirst, // existing emerge --getbinpkg behavior
-    PortageSource,      // existing from_source behavior
-}
+1. If an `.oxys` artifact exists with matching version and features, use it.
+2. If not, prompt the user: check binhost, build from source, or skip.
+3. `from_source()` always goes to Portage, bypassing the `.oxys` repo.
 
-Package::new("gui-wm/niri")
-    .backend(PackageBackend::Auto)
-    .features(["screencast"])
-```
+### Add repository configuration
 
-`from_source()` remains as a compatibility builder that selects
-`PortageSource`. Existing `use_flags()` behavior needs a clear rule:
-
-- an exact `.oxys` variant with those flags can satisfy the request;
-- otherwise `Auto` falls back to Portage source;
-- `OxysOnly` reports which requested variant was unavailable.
-
-### Add package policy and repositories
-
-Add a top-level package policy without changing ordinary defaults:
+Add repository policy to the top-level config:
 
 ```rust
 Oxys {
     package_policy: PackagePolicy {
-        default_backend: PackageBackend::Auto,
         repositories: vec![
             OxysRepository::new("stable", "https://packages.oxysos.org/v1")
                 .key("sha256:..."),
         ],
-        allow_portage_fallback: true,
         require_signed: true,
-        frozen_lock: true,
+        frozen_lock: true,  // for ISO builds
     },
     packages: vec![
-        Package::new("gui-wm/niri"),
-        Package::new("app-editors/neovim").backend(PackageBackend::PortageSource),
+        Package::new("gui-wm/niri").use_flags(vec!["screencast"]),
+        Package::new("app-editors/neovim").from_source(),
     ],
     ..Oxys::default()
 }
@@ -511,8 +531,8 @@ Repository credentials or private keys never belong in `manifest.toml`.
 ### Separate live-image intent from installed-system intent
 
 The current catalyst package list and the installer configuration can drift.
-Introduce an `ImageManifest` (or a `SystemManifest` target/profile field) in
-Rust for packages needed only by the live medium:
+Introduce an `ImageManifest` in Rust for packages needed only by the live
+medium:
 
 ```rust
 ImageManifest {
@@ -532,43 +552,34 @@ lockfiles such as `oxys-iso.lock` and `oxys.lock`.
 
 ## Resolver architecture
 
-### Keep two resolvers with a coordinator
+### One resolver for `.oxys`, Portage for everything else
 
-Rename the conceptual responsibilities even if module names change later:
+The resolver is simple: it walks the `.oxys` dependency graph and checks
+whether each dependency is satisfied by another `.oxys` artifact in the repo
+or by a package already present in VDB. There is no automatic fallback
+coordinator or unified planner merging two solver results.
 
 ```text
-UnifiedPlanner
-  |-- OxysArtifactResolver (Resolvo)
-  |     |-- repository packages
-  |     |-- installed .oxys packages
-  |     `-- target/policy virtual packages
+OxysResolver
+  |-- walks .oxys dependency tree
+  |-- checks VDB for already-installed packages
+  |-- reports missing dependencies to the user
   |
-  `-- PortagePolicyResolver (existing use_resolver)
-        |-- md5-cache parsing
-        |-- USE/keyword policy
-        `-- emerge target generation
+  User decides: binhost / source / skip
+  |
+  v
+  emerge (for missing packages only)
 ```
 
-The coordinator follows this algorithm:
+For ISO builds in frozen mode, all dependencies must be satisfiable from the
+`.oxys` repo. Missing dependencies are a build error — the repo must be
+complete.
 
-1. Normalize every manifest request and validate contradictory policy.
-2. Load trusted repository snapshot/index metadata.
-3. Add target facts as locked virtual packages: architecture, CPU baseline,
-   libc, init system, kernel build ID and allowed licenses.
-4. Query `.oxys` candidates matching each `Auto`/`OxysOnly` root request.
-5. Exclude incompatible candidates before solving.
-6. Resolve the `.oxys` graph with installed versions and the previous lockfile
-   preferred to minimize churn.
-7. Move unresolved `Auto` roots to the Portage set; fail unresolved `OxysOnly`
-   roots.
-8. Check the boundary: Portage roots must not overwrite files owned by selected
-   native `.oxys` packages, and `.oxys` dependencies cannot silently assume an
-   untracked Portage provider.
-9. Run the existing Portage policy planner for the fallback roots.
-10. Emit one plan with ordered fetch, unpack, trigger and emerge phases plus an
-    explanation for each backend choice.
+For installed-system operations, the resolver reports gaps and the user
+chooses. This keeps the resolver small and avoids trying to understand
+Portage's dependency semantics.
 
-### Why Resolvo is the default recommendation
+### Why Resolvo
 
 Resolvo's generic interface and SAT model are a good match for:
 
@@ -577,8 +588,7 @@ Resolvo's generic interface and SAT model are a good match for:
 - `provides` and virtual capabilities;
 - conflicts and replacements;
 - selecting one build from several feature variants;
-- lazy loading of repository metadata;
-- eventually solving bundles and individual artifacts together.
+- lazy loading of repository metadata.
 
 PubGrub remains attractive for its mature human-readable derivations and
 flexible package/version types. Before the end of the resolver milestone, run
@@ -598,74 +608,52 @@ trait ArtifactSolver {
 `SolveFailure` should contain a solver-neutral explanation tree so CLI/TUI
 output remains stable.
 
-### Portage is not merely the last resolver candidate
-
-Do not put every ebuild version into Resolvo and pretend that a successful solve
-means Portage will accept the result. Instead, the boundary is explicit:
-
-- `.oxys` dependencies must be satisfiable from `.oxys` artifacts or declared
-  external capabilities.
-- Portage roots and their transitive dependencies are resolved by Portage.
-- The unified planner invokes `emerge --pretend` before mutation and performs a
-  file/ownership conflict check against the selected `.oxys` state.
-- A future Portage adapter can import more complete dependency expressions, but
-  that is a separate project with its own conformance tests.
-
 ## Portage coexistence
 
-This is the highest-risk part of the design and must be proven before `.oxys`
-is used for the installed system.
+### VDB is the single source of truth
+
+Every package installed by `.oxys` composition gets a complete, real VDB entry
+in `/var/db/pkg/<category>/<PF>/`. This entry is captured from the reference
+build — not synthesized, not minimal. It includes USE, SLOT, RDEPEND, CONTENTS,
+repository, and all other metadata Portage expects.
+
+Consequences:
+
+- `emerge -uDN @world` works at any time. Portage sees every package.
+- `emerge --depclean` works. Portage understands the full dependency graph.
+- `qcheck` works. CONTENTS matches the installed files.
+- Users can freely mix `emerge` and `oxys` operations.
+
+When Oxys runs after the user has done a manual `emerge`, it reads VDB to see
+what changed, updates its own receipts to match reality, and moves on. It does
+not try to downgrade or fight Portage's decisions.
 
 ### Native Oxys packages
 
-Native `oxys/*` packages are owned only by the Oxys database. Portage does not
-consider them installed. Therefore:
+Native `oxys/*` packages also get VDB entries — synthetic but well-formed
+enough for Portage to understand them. This means `emerge --depclean` won't
+try to remove their dependencies. The VDB entries need:
 
-- native packages should initially install under collision-resistant locations
-  such as `/usr/libexec/oxys`, `/usr/share/oxys` and declared `/usr/bin` links;
-- the planner rejects overlaps with Portage-owned files unless an explicit,
-  reviewed `replaces` relation exists;
-- native packages must not claim to satisfy arbitrary Gentoo atoms;
-- removing a native package only removes files still matching its recorded
-  hash and not shared with another owner.
+- `CATEGORY`, `PF`, `SLOT`, `EAPI`
+- `CONTENTS` (file listing)
+- `RDEPEND` (so Portage knows what they need)
+- `KEYWORDS`, `USE`, `IUSE` (can be minimal)
+- `repository` (use `oxys` as the repo name)
 
-### Gentoo-derived `.oxys` packages
+Test early that Portage handles these gracefully across `--depclean`,
+`--pretend`, `qcheck` and `emerge -uDN @world`. The VDB entries should not
+cause Portage to attempt re-emerging or updating these packages.
 
-For a package built by Portage, merely copying its files is insufficient.
-Portage uses `/var/db/pkg/<category>/<PF>/` to understand the installed package,
-USE flags, SLOT, repository, dependency metadata and file contents.
+### Stage3 VDB import
 
-The preferred build path is:
+The stage3 base already has a complete VDB. When composing onto a stage3, Oxys
+must import awareness of its VDB CONTENTS into its collision detection. Without
+this, the composer doesn't know what files stage3 owns and cannot detect
+overlaps.
 
-1. Build/install the package in an isolated reference root using the pinned
-   Portage snapshot and profile.
-2. Capture only files owned by that VDB entry.
-3. Embed a validated VDB payload and provenance in the `.oxys` artifact.
-4. During composition, install package files and the matching VDB entry in one
-   transaction.
-5. Run safe centralized triggers after the whole plan is present.
-6. Validate the root with Portage queries and an `emerge --pretend` no-op check.
-
-Do not synthesize minimal fake VDB entries. Either preserve the complete,
-tested metadata contract from the reference root or mark the artifact
-`portage.compatible = false` and restrict it to ephemeral image composition.
-
-The spike must compare at least these approaches:
-
-- importing complete VDB entries captured from a reference root;
-- converting `.oxys` back into a local Gentoo binary package and asking Portage
-  to install it;
-- keeping `.oxys` image-only and using native Portage binpackages for all
-  installed-system packages.
-
-The second is safest for Portage semantics but still calls Portage's merge
-path; it avoids compilation, however, which may already meet the installed
-system requirement. The first gives the fastest ISO composer but needs strong
-compatibility testing. A practical split is:
-
-- ISO: direct `.oxys` extraction plus captured VDB, fully offline.
-- normal installed system: Portage binpkg handoff for Gentoo-derived packages
-  until direct extraction has passed upgrade/removal/preserved-libs testing.
+Import the stage3 VDB as read-only baseline state. Do not modify it. Oxys's
+collision preflight reads both VDB CONTENTS from the stage3 and file tables
+from `.oxys` artifacts being composed to detect conflicts before extraction.
 
 ### Centralized triggers
 
@@ -687,48 +675,88 @@ Portage-derived packages whose correctness depends on arbitrary pkg_postinst
 logic are not eligible for direct-install `.oxys` until that behavior has a
 typed equivalent; they fall back to Portage merge.
 
-## Transaction and ownership model
+## Oxys state records
+
+### What Oxys tracks (and what it doesn't)
+
+VDB is authoritative for what's installed. Oxys keeps a small sidecar that
+records:
+
+- which packages were installed via `.oxys` artifacts (so `oxys update` knows
+  which packages it can fast-path);
+- the artifact hash and build ID for each (so it can detect when a newer
+  artifact is available);
+- transaction history for rollback diagnostics.
+
+This is not an ownership database. It is not authoritative for file lists or
+dependencies. It is a record of provenance: "I installed this package from
+this artifact at this time."
 
 ### State paths
 
-Suggested paths:
-
 ```text
-/var/lib/oxys/packages.db       SQLite installed package and ownership state
-/var/lib/oxys/transactions/    durable journals and recovery records
-/var/cache/oxys/artifacts/     content-addressed downloaded `.oxys` files
-/var/cache/oxys/indexes/       verified repository indexes
-/var/log/oxys/                 human-readable transaction logs
+/var/lib/oxys/installed/
+  <category>/<pf>.toml           one receipt per .oxys-installed package
+/var/lib/oxys/transactions/      durable journals and recovery records
+/var/cache/oxys/artifacts/       content-addressed downloaded .oxys files
+/var/cache/oxys/indexes/         verified repository indexes
+/var/log/oxys/                   human-readable transaction logs
 ```
 
-SQLite tables should cover packages, provided capabilities, dependencies,
-files, shared ownership, transactions, operations, triggers and repository
-snapshot provenance. Enable foreign keys, use WAL where appropriate, and
-fsync the journal/commit boundary for real system installs.
+An installed receipt is minimal:
+
+```toml
+package = "gentoo/gui-wm/niri@25.11-r1#2:0"
+artifact = "sha256:..."
+build_id = "sha256:..."
+installed_at = "2026-07-15T03:15:29Z"
+transaction = "20260715T031522Z-7e4b..."
+```
+
+When `oxys update` runs, it checks each receipt against the repo for newer
+artifacts, and checks VDB to see if Portage has already updated the package.
+If VDB shows a newer version than the receipt, Oxys updates the receipt (or
+removes it if the package was updated via `emerge`).
+
+### Reconciliation with manual emerge
+
+When `oxys` detects that VDB differs from its receipts:
+
+- Package was upgraded by `emerge`: update or remove the Oxys receipt. The
+  package is no longer on the `.oxys` fast path unless a matching artifact
+  exists for the new version.
+- Package was removed by `emerge --depclean`: remove the Oxys receipt.
+- Package was added by `emerge`: ignore it. Oxys only tracks packages it
+  installed.
+
+This is a read-only reconciliation. Oxys never modifies VDB based on its own
+records — VDB is always right.
+
+## Transaction and install model
 
 ### Install algorithm
 
 1. Acquire a global Oxys package lock and separately check Portage is not
    running.
-2. Verify the plan still matches the installed generation and repository
-   snapshot.
+2. Verify the plan against the repository snapshot.
 3. Fetch and fully verify all artifacts before modifying the root.
-4. Read file tables and preflight every collision, disk-space requirement,
-   target constraint and protected path.
+4. Read file tables and preflight every collision against VDB CONTENTS
+   (including stage3 baseline), disk-space requirements, and protected paths.
 5. Create a durable transaction journal.
-6. Extract into a staging directory on the target filesystem using safe
+6. Allocate or verify required system users/groups and map UID/GID.
+7. Extract into a staging directory on the target filesystem using safe
    `openat`-style traversal; never follow untrusted symlinks.
-7. Snapshot or back up every path that will be replaced. On ZFS/Btrfs, a
+8. Snapshot or back up every path that will be replaced. On ZFS/Btrfs, a
    filesystem snapshot can optimize this, but correctness cannot require it.
-8. Rename/copy staged paths into place in deterministic dependency order.
-9. Install compatible VDB records and record ownership in SQLite.
-10. Run deduplicated typed triggers.
-11. Commit the database generation and transaction marker.
-12. Delete backups asynchronously only after commit.
+9. Rename/copy staged paths into place in deterministic dependency order.
+10. Write complete VDB entries for each package.
+11. Write Oxys receipts.
+12. Run deduplicated typed triggers.
+13. Commit the transaction marker.
+14. Delete backups asynchronously only after commit.
 
 If a crash occurs, the next invocation reads the journal and either completes
-the commit or restores the pre-transaction paths. A database transaction alone
-is not sufficient because filesystem changes are outside SQLite.
+the commit or restores the pre-transaction paths.
 
 ### Upgrade and removal
 
@@ -743,7 +771,7 @@ is not sufficient because filesystem changes are outside SQLite.
 - Shared identical files are allowed only when explicitly represented; differing
   hashes are a conflict.
 - `replaces` authorizes ownership transfer only for named versions and paths.
-- Keep the previous lockfile and package generation for rollback diagnostics.
+- Keep the previous lockfile for rollback diagnostics.
 
 ## ISO pipeline design
 
@@ -753,12 +781,14 @@ is not sufficient because filesystem changes are outside SQLite.
 oxys-iso/config.rs
   -> oxys compile-image
   -> image-manifest.toml
-  -> oxys resolve --target-root / --lock oxys-iso.lock
+  -> oxys resolve --lock oxys-iso.lock  (frozen: all deps must be in repo)
   -> oxys fetch --locked --offline-capable
   -> unpack Gentoo stage3 into composition root
+  -> import stage3 VDB for collision awareness
   -> oxys compose --root <composition-root> --locked
+  -> write VDB entries for all composed packages
   -> inject oxys-build kernel + zfs-kmod build pair
-  -> validate root and VDB
+  -> validate root: VDB coherence, qcheck, emerge --pretend
   -> catalyst livecd-stage2
   -> squashfs + ISO
 ```
@@ -820,15 +850,14 @@ Add an isolated builder, preferably under `oxys-build/packages/`, that can:
 
 1. Accept a Rust image/package-set declaration and pinned repository snapshot.
 2. Create a clean reference root/container for each compatibility target.
-3. Ask Portage to resolve and build missing packages once, using official and
-   local binpkg caches where possible.
-4. Capture each installed package's owned files and VDB metadata.
+3. Ask Portage to resolve and build packages, using official and local binpkg
+   caches where possible.
+4. Capture each installed package's owned files and complete VDB metadata.
 5. Normalize metadata and payload deterministically.
 6. Emit `.oxys`, provenance and optional SBOM.
-7. Reinstall the artifact into an empty test root and compare its owned paths
-   with the reference root.
-8. Run Portage interoperability tests.
-9. Publish content-addressed artifacts, then atomically publish a signed index
+7. Reinstall the artifact into an empty test root, write VDB, and verify
+   Portage behavior: `qcheck`, `emerge --pretend`, `--depclean`.
+8. Publish content-addressed artifacts, then atomically publish a signed index
    snapshot.
 
 Never build packages during index publication. Publication is a metadata-only
@@ -854,17 +883,16 @@ but maintain clear module boundaries:
 ```text
 oxys/src/packages/
   model.rs          package IDs, versions, constraints, capabilities
-  format.rs         framed `.oxys` reader/writer
+  format.rs         framed .oxys reader/writer
   index.rs          signed repository metadata and cache
   lockfile.rs       stable lock schema
   solve.rs          solver-neutral interface
   resolvo.rs        Resolvo adapter
-  plan.rs           unified Oxys/Portage coordinator
-  transaction.rs    journal and filesystem commit/recovery
-  ownership.rs      SQLite state and collision checks
-  triggers.rs       typed post-install actions
-  portage_bridge.rs VDB/binpkg handoff and interoperability checks
   compose.rs        alternate-root/image installation
+  transaction.rs    journal and filesystem commit/recovery
+  triggers.rs       typed post-install actions
+  vdb.rs            VDB reading, writing and validation
+  receipts.rs       lightweight Oxys provenance records
 ```
 
 Potential CLI:
@@ -902,19 +930,20 @@ Deliverables:
   capabilities, conflicts and one kernel-coupled package.
 - Prototype the solver-neutral model with both Resolvo and PubGrub.
 - Build two or three packages in a clean Gentoo root, capture their complete VDB
-  entries, install into another root and test Portage behavior.
-- Compare direct VDB restoration with conversion/handoff to a local Gentoo
-  binpkg.
+  entries, install files and VDB into another root, and test Portage behavior.
+- Verify `qcheck`, `emerge --pretend`, `emerge -uDN @world`, `--depclean` and
+  `emerge --unmerge` all work correctly against restored VDB entries.
+- Create synthetic VDB entries for two `oxys/*` native packages and verify
+  Portage handles them gracefully.
 - Define which typed triggers are required by the current live package set.
 - Freeze package ID, version-scheme and target-compatibility rules.
 
 Exit criteria:
 
 - Resolver can explain a successful variant choice and an unsatisfiable case.
-- A restored test root passes `qcheck`/equivalent ownership validation and
-  sensible `emerge --pretend`, upgrade and unmerge scenarios.
-- The project chooses and documents direct extraction versus Portage binpkg
-  handoff separately for ISO and installed-system paths.
+- A restored test root passes all Portage operations listed above.
+- Synthetic `oxys/*` VDB entries survive `--depclean` and `@world` updates.
+- The project documents which Portage operations are tested and passing.
 
 ### Phase 1: format, verification and lockfile
 
@@ -922,7 +951,9 @@ Deliverables:
 
 - Implement bounded framed reader/writer and deterministic payload creation.
 - Implement path-safe extraction into an alternate root.
-- Implement canonical file tables and payload/file hashing.
+- Implement canonical file tables with xattrs, capabilities and hardlink
+  support.
+- Implement UID/GID mapping from symbolic user/group declarations.
 - Define repository index and `oxys.lock` v1 schemas.
 - Implement local filesystem repositories before HTTP repositories.
 - Add `inspect`, `verify`, `resolve` and `fetch` commands.
@@ -939,26 +970,27 @@ Exit criteria:
 
 Deliverables:
 
-- Add `PackageBackend`, repository policy and compatibility target fields.
+- Add repository policy fields to the Rust DSL.
 - Compile them into the generated TOML without breaking old configs.
 - Implement the chosen resolver adapter and solver-neutral explanations.
-- Add the unified coordinator and explicit Portage fallback reasons.
-- Preserve the current `use_resolver` behavior for fallback requests.
+- Implement user prompting for missing dependencies.
+- Preserve the current `use_resolver` behavior for Portage fallback.
 
 Exit criteria:
 
-- Old manifests choose the same Portage targets when no Oxys repository is
-  configured.
-- `Auto`, `OxysOnly`, `PortageBinaryFirst` and `PortageSource` have fixture
-  coverage.
-- Custom USE requests select an exact artifact variant or predictably fall back.
+- Old manifests behave identically when no Oxys repository is configured.
+- Custom USE requests select an exact artifact variant or prompt the user.
 - Conflicts identify the root request and dependency chain in CLI/TUI output.
+- Frozen mode fails on any missing dependency without prompting.
 
-### Phase 3: ownership and transactional alternate-root install
+### Phase 3: VDB integration and transactional alternate-root install
 
 Deliverables:
 
-- Add SQLite ownership/state database with schema migrations.
+- Implement VDB writing from captured reference-build metadata.
+- Implement VDB reading for collision preflight (including stage3 baseline).
+- Implement synthetic VDB entries for `oxys/*` native packages.
+- Implement Oxys receipt writing and reconciliation with VDB.
 - Implement collision preflight and config-file policy.
 - Implement durable transaction journals and crash recovery.
 - Implement typed triggers required by the live desktop.
@@ -966,19 +998,21 @@ Deliverables:
 
 Exit criteria:
 
+- Composed root passes `qcheck` for every package.
+- `emerge --pretend -uDN @world` reports no changes needed.
+- `emerge --depclean` does not remove composed packages or their dependencies.
 - Injected failures at every mutation step recover to either the old or new
-  complete generation.
+  complete state.
 - Conflicting files fail before mutation.
 - Upgrade/removal preserves locally modified configuration.
 - Repeated install is idempotent.
-- A composed reference root matches expected package file hashes and ownership.
 
 ### Phase 4: package conversion/build pipeline
 
 Deliverables:
 
 - Build Gentoo-derived `.oxys` packages from a pinned clean root.
-- Capture build provenance, USE/profile/repository data and VDB payloads.
+- Capture build provenance, USE/profile/repository data and complete VDB.
 - Add package reinstall/reference-root comparison tests.
 - Generate and sign a development repository index.
 - Publish the current ISO stage1 package set for one target first:
@@ -986,9 +1020,9 @@ Deliverables:
 
 Exit criteria:
 
-- Every artifact can reconstruct its owned files from an empty staging root.
+- Every artifact can reconstruct its owned files and VDB from an empty root.
 - Repository publication is atomic and old lockfiles remain fetchable.
-- Gentoo-derived artifacts pass the Phase 0 interoperability decision.
+- Gentoo-derived artifacts pass all Phase 0 Portage interoperability tests.
 - Kernel/ZFS coupled artifacts cannot be selected against a mismatched build ID.
 
 ### Phase 5: ISO composer integration
@@ -997,7 +1031,7 @@ Deliverables:
 
 - Replace the hand-maintained stage1 package block with `oxys-iso/config.rs`.
 - Commit or release-manage `oxys-iso.lock`.
-- Add stage3 unpack + `.oxys` composition + validation command/script.
+- Add stage3 unpack + VDB import + `.oxys` composition + validation.
 - Emit catalyst's expected stage1 tarball and invoke only stage2.
 - Add fully offline mode and cache prefetch tooling.
 - Record lockfile, stage3 digest and kernel build ID in ISO metadata.
@@ -1008,8 +1042,9 @@ Exit criteria:
 - Cold-cache ISO build downloads artifacts but performs no package compilation.
 - The produced ISO boots in QEMU, launches the installer and completes ext4
   installation.
-- The installed copy contains coherent Oxys ownership state and Portage VDB.
-- A package can subsequently be installed through the existing Portage fallback.
+- The installed system has coherent VDB and passes all Portage operations.
+- A package can subsequently be installed through `emerge`.
+- `emerge -uDN @world` on the installed system works without errors.
 - Output contents are equivalent to the current catalyst stage1 package set,
   modulo documented normalization.
 
@@ -1017,11 +1052,10 @@ Exit criteria:
 
 Deliverables:
 
-- Insert an `InstallResolvedPackages` step before the existing
-  `EmergePackages` fallback, or replace both with one unified package-plan step.
+- Enable `.oxys` install on live systems (not just alternate roots).
 - Add online repository update, package upgrade and rollback behavior.
-- Coordinate global locking with Portage and detect external Portage mutations.
-- Reconcile ownership after users run `emerge` directly.
+- Implement VDB reconciliation after manual `emerge` operations.
+- Coordinate global locking with Portage.
 - Surface transaction progress through the existing structured installer event
   stream.
 
@@ -1029,8 +1063,8 @@ Exit criteria:
 
 - Mixed `.oxys` plus Portage installs work across install, upgrade, remove and
   reboot.
-- Direct external emerge either safely coexists or causes a clear reconciliation
-  requirement rather than silent database drift.
+- Manual `emerge -uDN @world` after `.oxys` installs works without errors.
+- `oxys update` after manual `emerge` upgrades handles receipt reconciliation.
 - Preserved libraries, initramfs-relevant packages and boot-critical upgrades
   have dedicated integration tests.
 
@@ -1055,28 +1089,33 @@ Deliverables:
 - Arbitrary malformed container input must never panic or allocate without
   bound.
 - Path normalization and symlink-safe extraction.
+- UID/GID mapping from symbolic declarations.
 - Solver determinism independent of index iteration order.
 - Solver explanation snapshots for conflicts and missing variants.
 - Lockfile forward/backward compatibility rules.
 
 ### Integration tests
 
-- Install/upgrade/remove native packages in a temporary root.
-- File collision, shared file and explicit replacement cases.
+- Install/upgrade/remove packages in a temporary root with VDB.
+- VDB entries pass `qcheck`, `emerge --pretend`, `--depclean`, `--unmerge`.
+- Synthetic `oxys/*` VDB entries survive all Portage operations.
+- File collision cases detected via VDB CONTENTS preflight.
 - Crash/failure injection before and after every journal checkpoint.
 - Config file modified/unmodified upgrade cases.
-- Portage-derived package VDB query, pretend, upgrade and unmerge behavior.
-- Mixed plan where one root is `.oxys` and another falls back to emerge.
+- Receipt reconciliation after simulated manual `emerge` changes.
+- Mixed plan where some packages are `.oxys` and others are emerged.
 - Offline resolve from a lockfile and offline compose from a warm cache.
 - Kernel/ZFS build-ID mismatch rejection.
+- Stage3 VDB import and collision detection against base packages.
 
 ### End-to-end tests
 
 - Build the current live package closure once, publish to a local repository,
   compose a stage1 and run catalyst stage2.
 - Boot ISO under QEMU for BIOS and UEFI paths used by the project.
-- Install to ext4, boot the installed disk and run ownership/Portage checks.
-- Run a subsequent Portage package install and an `.oxys` update.
+- Install to ext4, boot the installed disk and run Portage checks.
+- Run `emerge -uDN @world` on the installed system.
+- Run a subsequent `emerge` install and an `oxys update`.
 - Compare important executables, libraries, services, VDB entries and file modes
   with the current catalyst-emerged image.
 
@@ -1097,15 +1136,25 @@ package compilation.
 
 ## Risks and mitigations
 
-### Portage database drift
+### Portage VDB compatibility
 
-Risk: Portage does not know what `.oxys` installed, or an external emerge
-changes files behind Oxys's database.
+Risk: VDB entries captured from a reference build are subtly wrong or
+incomplete, causing `emerge` to misbehave.
 
-Mitigation: preserve/test full VDB records for compatible artifacts, maintain a
-separate ownership DB, lock against concurrent Portage operations, and provide
-`oxys verify/reconcile`. Restrict direct install to ISO roots until conformance
-tests pass.
+Mitigation: capture complete VDB from real Portage builds, never synthesize
+Gentoo-derived entries. Test every Portage operation (pretend, depclean,
+unmerge, world update, qcheck) in Phase 0 and in CI. For native `oxys/*`
+packages, test synthetic entries separately and conservatively.
+
+### Synthetic VDB for native packages
+
+Risk: Portage chokes on `oxys/*` VDB entries — tries to update them, can't
+find an ebuild, fails during `@world` updates.
+
+Mitigation: test this thoroughly in Phase 0. If Portage cannot handle them
+gracefully, fall back to keeping native packages out of VDB and accepting
+that `--depclean` won't understand their dependency contribution. This is
+strictly worse but safe.
 
 ### Package hooks contain hidden correctness
 
@@ -1146,10 +1195,18 @@ Mitigation: signed expiring snapshots, content-addressed artifacts, trusted
 root/key rotation and monotonic snapshot/version checks. Lockfiles provide
 reproducibility but must not silently disable expiry/security policy.
 
+### Stage3 blind spot
+
+Risk: collision detection misses files owned by stage3 packages because Oxys
+doesn't know about them.
+
+Mitigation: import stage3 VDB CONTENTS as read-only baseline state during
+composition. Preflight all `.oxys` file tables against this baseline.
+
 ## Open decisions to settle during Phase 0
 
-1. Should installed-system Gentoo-derived packages use direct VDB restoration,
-   local Portage binpkg handoff, or remain Portage-only initially?
+1. Can synthetic VDB entries for `oxys/*` packages survive all Portage
+   operations, or should native packages stay outside VDB?
 2. Is Resolvo's richer SAT model needed by the final v1 metadata, or does the
    fixture corpus show PubGrub provides a simpler implementation with better
    explanations?
@@ -1157,13 +1214,14 @@ reproducibility but must not silently disable expiry/security policy.
 4. Which live packages require post-install behavior beyond the proposed typed
    triggers?
 5. Should the repository use CBOR or another canonical binary index encoding?
-   This does not affect the human-readable metadata inside `.oxys`.
 6. Is a generated desktop bundle worth the additional publishing complexity,
    or are individual artifact extraction times already small compared with
    squashfs creation?
 7. What is the supported release matrix beyond the first
    `amd64/x86-64-v3/glibc/OpenRC` target?
 8. What is the repository key ownership, offline backup and rotation process?
+9. What is the fixed Oxys system-ID registry for deterministic UID/GID in
+   ISO composition?
 
 ## Suggested first vertical slice
 
@@ -1172,14 +1230,16 @@ The smallest slice that proves the idea without risking installed systems is:
 1. Implement local unsigned development repositories and the `.oxys` reader,
    writer, file table and safe alternate-root extraction.
 2. Package three independent live tools and one small dependency chain from a
-   clean reference root.
+   clean reference root, capturing complete VDB.
 3. Resolve them with the solver-neutral interface and write a lockfile.
-4. Compose them onto a stage3 in `/tmp` with ownership state and captured VDB.
-5. Validate Portage queries in that root.
-6. Generate the stage1 tarball catalyst expects and complete stage2.
-7. Boot the ISO in QEMU.
+4. Compose them onto a stage3 with VDB entries written.
+5. Import stage3 VDB and verify collision-free composition.
+6. Validate Portage queries in that root: `qcheck`, `emerge --pretend`,
+   `emerge -uDN @world`, `--depclean`.
+7. Generate the stage1 tarball catalyst expects and complete stage2.
+8. Boot the ISO in QEMU.
 
 After that works, expand the repository to the desktop closure and measure the
 real build-time reduction. Only then enable `.oxys` writes to a normal installed
-root. This ordering proves the core value—removing repeated ISO compilation—while
-keeping the existing emerge path intact throughout development.
+root. This ordering proves the core value — removing repeated ISO compilation —
+while keeping the existing emerge path intact throughout development.
