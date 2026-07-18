@@ -43,7 +43,10 @@ fn apply_reconciles_world_with_manifest() -> Result<(), Box<dyn std::error::Erro
         ],
         ..SystemManifest::default()
     };
-    fs::write(workdir.path().join("manifest.toml"), manifest_to_toml(&desired)?)?;
+    fs::write(
+        workdir.path().join("manifest.toml"),
+        manifest_to_toml(&desired)?,
+    )?;
 
     let output = Command::new(env!("CARGO_BIN_EXE_oxys"))
         .arg("apply")
@@ -80,7 +83,9 @@ fn apply_reconciles_world_with_manifest() -> Result<(), Box<dyn std::error::Erro
     );
     assert!(
         calls.iter().any(|line| {
-            line.contains("--noreplace") && line.contains("--select") && line.contains("app-admin/added")
+            line.contains("--noreplace")
+                && line.contains("--select")
+                && line.contains("app-admin/added")
         }),
         "expected added package to be select'd without rebuilding, log:\n{log}"
     );

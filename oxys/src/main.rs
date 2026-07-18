@@ -121,9 +121,10 @@ enum PackageCommands {
         /// Clean reference root containing the installed package.
         #[arg(long, default_value = "/")]
         root: PathBuf,
-        /// Artifact path to create.
-        #[arg(short, long, default_value = "package.oxys")]
-        output: PathBuf,
+        /// Exact artifact path to create. By default the package identity,
+        /// architecture, and CPU baseline determine the filename.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
     },
     /// Print verified artifact metadata.
     Inspect { artifact: PathBuf },
@@ -165,7 +166,7 @@ fn main() -> ExitCode {
         } => cli::install::run(target, confirm, device, copy_system, &source_root),
         Commands::Package { command } => match command {
             PackageCommands::Build { atom, root, output } => {
-                cli::package::build(&root, &atom, &output)
+                cli::package::build(&root, &atom, output.as_deref())
             }
             PackageCommands::Inspect { artifact } => cli::package::inspect(&artifact),
             PackageCommands::Verify { artifact } => cli::package::verify(&artifact),
@@ -254,8 +255,9 @@ COMMON COMMANDS
     oxys update
         Run emerge --sync and a guarded emerge -uDN @world.
 
-    oxys package build gui-apps/wl-clipboard --root / --output wl-clipboard.oxys
-        Capture package files plus the complete Portage VDB entry.
+    oxys package build gui-apps/wl-clipboard --root /
+        Capture package files plus the complete Portage VDB entry, naming the
+        artifact from its package identity, architecture, and CPU baseline.
 
     oxys package verify <artifact.oxys>
         Verify the framed container, canonical file table, tar, and hashes.
@@ -463,8 +465,21 @@ mod tests {
             } => {
                 assert_eq!(atom, "gui-apps/wl-clipboard");
                 assert_eq!(root, PathBuf::from("/reference"));
-                assert_eq!(output, PathBuf::from("wl.oxys"));
+                assert_eq!(output, Some(PathBuf::from("wl.oxys")));
             }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn package_build_has_no_generic_default_filename() {
+        let cli = Cli::try_parse_from(["oxys", "package", "build", "gui-apps/wl-clipboard"])
+            .expect("package build should parse");
+
+        match cli.command {
+            Commands::Package {
+                command: PackageCommands::Build { output, .. },
+            } => assert_eq!(output, None),
             other => panic!("unexpected command: {other:?}"),
         }
     }

@@ -14,13 +14,13 @@ oxys-iso/
 ├── git-sources.conf               # live git-r3 sources prefetched before build
 ├── catalyst-overrides/
 │   └── kmerge.sh                  # replaces catalyst's own kmerge.sh: injects
-│                                   # oxys-build's tagged kernel+zfs-kmod instead
+│                                   # oxys-build's published kernel+zfs-kmod instead
 │                                   # of emerging/compiling one
 ├── scripts/
 │   ├── enter-container.sh         # build+enter the catalyst container (rootful)
 │   ├── prefetch-git-sources.sh    # cache configured Git sources before catalyst
 │   ├── resolve-kernel-build.sh    # finds+verifies the oxys-build kernel/zfs-kmod
-│   │                               # pair for OXYS_ARCH/OXYS_KERNEL_BUILD_ID
+│   │                               # published pair for OXYS_ARCH
 │   └── run-qemu.sh                # boot a built ISO in QEMU
 ├── specs/
 │   ├── installcd-stage1.spec      # target: livecd-stage1  (live package set)
@@ -37,8 +37,10 @@ oxys-iso/
 ## Prebuilt kernel dependency
 
 `oxys-build` (the sibling directory in this monorepo) must be run **first**
-for the target arch, producing a build-id-tagged, vermagic-verified kernel +
-zfs-kmod + zfs tarball set under `../oxys-build/output/<arch>/`. `build.sh`
+for the target arch, producing a stable-named, vermagic-verified kernel +
+zfs-kmod + zfs tarball set under `../oxys-build/output/<arch>/`. For example:
+`oxys-kernel-6.18.38-v3.tar.gz`, `oxys-zfs-kmod-2.3.6-v3.tar.gz`, and
+`oxys-zfs-2.3.6-v3.tar.gz`. `build.sh`
 consumes that output directly — catalyst's own kernel-build step is disabled
 entirely for stage2 (see `specs/installcd-stage2.spec` and
 `catalyst-overrides/kmerge.sh`), so the ISO's kernel is byte-for-byte the same
@@ -46,15 +48,16 @@ one `oxys-build` produced, not a second, independently re-derived one. This is
 what prevents the ISO's kernel and the post-install package pipeline's kernel
 from silently drifting apart.
 
-Two environment variables control which build gets used:
+One environment variable controls which build gets used:
 
 - **`OXYS_ARCH`** (required, no default) — which `../oxys-build/output/<arch>/`
   to pull from, e.g. `alderlake`. `build.sh` fails fast and lists available
   arches if this isn't set; a hardware-targeted kernel build shouldn't have a
   silent default.
-- **`OXYS_KERNEL_BUILD_ID`** (optional) — a specific build-id to use instead of
-  the latest. Defaults to the contents of `../oxys-build/output/<arch>/build-id`
-  (oxys-build's own "current build" pointer).
+
+The exact completed set is recorded in
+`../oxys-build/output/<arch>/kernel-artifacts.env`. Build IDs remain internal
+metadata used only to reject incomplete or mismatched artifact sets.
 
 Graphics capabilities are build inputs too:
 
@@ -77,7 +80,7 @@ explicit graphics variable is an error. The finished image records the actual re
 validates before modifying a target.
 
 `build.sh` fails fast — before catalyst even starts — if no valid, paired
-kernel+zfs-kmod build exists for the requested arch/build-id (see
+kernel+zfs-kmod build exists for the requested arch (see
 `scripts/resolve-kernel-build.sh`), rather than failing deep inside a stage2
 run. It never falls back to letting catalyst build its own kernel.
 
@@ -101,8 +104,8 @@ via a plain `livecd/overlay` dir rather than the kernel-injection path.
   tarball contract its own distkernel path would have — everything downstream
   (`extract_kernels`/`extract_modules`, grub.cfg generation) is untouched
   stock catalyst.
-- **ZFS.** The kmod is injected alongside the kernel (same tarball pairing,
-  same build_id — see above); it is not in the initramfs (root is squashfs,
+- **ZFS.** The kmod is injected alongside the kernel (same published artifact
+  set and internal build ID); it is not in the initramfs (root is squashfs,
   not a pool) — the module is loaded in userspace before the installer runs
   (see below). zfs userland (`zpool`/`zfs` CLI) rides in via `livecd/overlay`
   from oxys-build's own zfs tarball, since it has no kernel-version coupling.

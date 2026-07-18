@@ -329,6 +329,18 @@ pub fn resolve_session(manifest: &SystemManifest) -> Result<ResolvedSession, Ses
     }
 
     for required in &requirements.services {
+        if manifest.init_system == InitSystem::Openrc
+            && manifest
+                .services
+                .openrc
+                .runlevels()
+                .any(|(_, services)| !services.is_empty())
+            && !manifest.services.openrc.contains(required)
+        {
+            return Err(invalid(format!(
+                "session requires OpenRC service {required:?}, but it is absent from the authoritative services.openrc runlevels"
+            )));
+        }
         if manifest
             .services
             .disabled

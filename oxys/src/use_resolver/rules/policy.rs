@@ -222,7 +222,9 @@ fn init_reason(origin: PolicyOrigin, selected: &str) -> String {
     match origin {
         PolicyOrigin::Manifest => format!("manifest init system is {selected}"),
         PolicyOrigin::Inferred => {
-            format!("fallback package inference selected {selected} because the manifest does not declare an init system")
+            format!(
+                "fallback package inference selected {selected} because the manifest does not declare an init system"
+            )
         }
         PolicyOrigin::Unspecified => format!("init system remains unspecified; using {selected}"),
     }

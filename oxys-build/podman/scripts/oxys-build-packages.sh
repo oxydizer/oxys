@@ -34,6 +34,7 @@ KERNEL_STAGE_ROOT="${OUTPUT_ROOT}/${ARCH_NAME}/kernel-stage"
 KERNEL_CONFIG_STAGE_DIR="${OUTPUT_ROOT}/${ARCH_NAME}/kernel-config"
 BUILD_ID_FILE="${OUTPUT_ROOT}/${ARCH_NAME}/build-id"
 KERNEL_RELEASE_FILE="${OUTPUT_ROOT}/${ARCH_NAME}/kernel-release"
+KERNEL_ARTIFACTS_FILE="${OUTPUT_ROOT}/${ARCH_NAME}/kernel-artifacts.env"
 
 readonly BINHOST_BASELINE_USE_FLAGS="X wayland dbus systemd -elogind policykit alsa pipewire pulseaudio vulkan opengl gtk jpeg png webp svg fontconfig harfbuzz udev ssl threads unicode"
 readonly GLOBAL_USE_FLAGS="${BINHOST_BASELINE_USE_FLAGS} -debug zfs -california -colorado"
@@ -41,6 +42,19 @@ readonly COMMON_FEATURES="parallel-fetch candy"
 readonly ACCEPT_KEYWORDS_VALUE="amd64"
 readonly FIREFOX_ATOM="www-client/firefox"
 readonly PROFILE_TARGET="default/linux/amd64/23.0"
+readonly BINHOST_PROFILE_TARGET="default/linux/amd64/23.0/no-multilib"
+readonly BINHOST_ATOM="app-admin/oxys::oxys"
+readonly BINHOST_FINAL_DIRNAME="x86-64-v3"
+BINHOST_WORK_ROOT="${OXYS_BINHOST_WORK_ROOT:-${OUTPUT_ROOT}/.binhost-work/${ARCH_NAME}}"
+BINHOST_UNSIGNED_REPO="${BINHOST_WORK_ROOT}/unsigned"
+BINHOST_SIGNED_REPO="${BINHOST_WORK_ROOT}/signed"
+BINHOST_PUBLISH_ROOT="${OXYS_BINHOST_PUBLISH_ROOT:-${OUTPUT_ROOT}/binpackages}"
+BINHOST_SIGNING_SOURCE="${OXYS_BINPKG_SIGNING_GPG_HOME:-}"
+BINHOST_SIGNING_KEY="${OXYS_BINPKG_SIGNING_KEY:-}"
+BINHOST_SIGNING_ROOT=""
+BINHOST_SIGNING_HOME=""
+BINHOST_VERIFY_HOME=""
+BINHOST_PUBLISH_STAGE=""
 # Gentoo's official binhost for the x86-64-v3 baseline. Only the "generic"
 # build profile (utilities where -march tuning barely matters) is allowed to
 # pull from it -- "native"/"kernel"/"pgo" exist specifically to produce
@@ -78,6 +92,9 @@ readonly KERNEL_SOURCE_ATOM="=sys-kernel/gentoo-sources-6.18.38"
 readonly ZFS_KMOD_ATOM="=sys-fs/zfs-kmod-2.3.6"
 readonly ZFS_USERLAND_ATOM="=sys-fs/zfs-2.3.6"
 BUILD_ID=""
+KERNEL_ARCHIVE_NAME=""
+ZFS_KMOD_ARCHIVE_NAME=""
+ZFS_USERLAND_ARCHIVE_NAME=""
 
 readonly -a KERNEL_PACKAGES=(
   "${KERNEL_SOURCE_ATOM}"
@@ -196,6 +213,11 @@ ensure_dirs() {
   touch "${TIMES_LOG}" "${CONTAINER_LOG}"
   if [[ -n "${OXYS_BUILD_ID:-}" ]]; then
     BUILD_ID="$(sanitize_build_id "${OXYS_BUILD_ID}")"
+  elif [[ "${BUILD_PROFILE}" == "kernel" ]]; then
+    # A kernel profile is one publish transaction. Give every run a fresh
+    # internal id so partially replaced artifacts cannot form a valid pair.
+    BUILD_ID="$(generated_build_id)"
+    printf '%s\n' "${BUILD_ID}" > "${BUILD_ID_FILE}"
   elif [[ -f "${BUILD_ID_FILE}" ]]; then
     BUILD_ID="$(sanitize_build_id "$(<"${BUILD_ID_FILE}")")"
     if [[ ! "${BUILD_ID}" =~ ^[0-9]{8}T[0-9]{6}Z-gentoo-[0-9]{8}T[0-9]{6}Z$ ]]; then
@@ -205,6 +227,10 @@ ensure_dirs() {
   else
     BUILD_ID="$(generated_build_id)"
     printf '%s\n' "${BUILD_ID}" > "${BUILD_ID_FILE}"
+  fi
+  if [[ "${BUILD_PROFILE}" == "kernel" ]]; then
+    # Do not advertise the stable filenames while this run replaces them.
+    rm -f "${KERNEL_ARTIFACTS_FILE}"
   fi
   if [[ -z "${BUILD_ID}" || ! "${BUILD_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
     printf 'Invalid build id: %s\n' "${BUILD_ID}" >&2
@@ -437,6 +463,18 @@ archive_from_vdb() {
     archive_base="firefox"
   fi
   local archive_name="${archive_base}-${suffix}-${version}.tar.gz"
+  if [[ "${BUILD_PROFILE}" == "kernel" ]]; then
+    case "$(package_key "${atom}")" in
+      sys-fs/zfs-kmod)
+        archive_name="oxys-zfs-kmod-${version}-${ARCH_NAME}.tar.gz"
+        ZFS_KMOD_ARCHIVE_NAME="${archive_name}"
+        ;;
+      sys-fs/zfs)
+        archive_name="oxys-zfs-${version}-${ARCH_NAME}.tar.gz"
+        ZFS_USERLAND_ARCHIVE_NAME="${archive_name}"
+        ;;
+    esac
+  fi
   local archive_path="${OUTPUT_ROOT}/${ARCH_NAME}/${archive_name}"
   local manifest_raw manifest
   manifest_raw="$(mktemp)"
@@ -583,6 +621,7 @@ assert_boot_critical_kernel_config() {
   local config="/usr/src/linux/.config"
   local missing=() opt
   for opt in OVERLAY_FS SQUASHFS BLK_DEV_LOOP ISO9660_FS BLK_DEV_DM \
+             SWAP ZRAM ZRAM_BACKEND_ZSTD \
              SCSI BLK_DEV_SD BLK_DEV_SR SATA_AHCI BLK_DEV_NVME USB_STORAGE \
              VFAT_FS EFI EFI_STUB INPUT_EVDEV VIRTIO_INPUT \
              PACKET \
@@ -648,7 +687,7 @@ prepare_kernel_tree() {
 }
 
 build_kernel_artifacts() {
-  local kernel_release archive_name archive_path
+  local kernel_release kernel_version archive_name archive_path
 
   log "Building kernel for ${ARCH_NAME}"
   rm -rf "${KERNEL_STAGE_ROOT}"
@@ -679,11 +718,32 @@ build_kernel_artifacts() {
     printf 'drm_drivers=%s\n' "${DRM_DRIVERS_POLICY}"
   } > "${KERNEL_STAGE_ROOT}/usr/src/oxysos/build-metadata.env"
 
-  archive_name="kernel-${ARCH_NAME}-${kernel_release}-${BUILD_ID}.tar.gz"
+  kernel_version="${kernel_release%-oxys}"
+  archive_name="oxys-kernel-${kernel_version}-${ARCH_NAME}.tar.gz"
+  KERNEL_ARCHIVE_NAME="${archive_name}"
   archive_path="${OUTPUT_ROOT}/${ARCH_NAME}/${archive_name}"
   tar -C "${KERNEL_STAGE_ROOT}" -czf "${archive_path}" .
   write_archive_metadata "${archive_path}" "sys-kernel/gentoo-sources" "${kernel_release}" "${kernel_release}"
   log "Created ${archive_name}"
+}
+
+publish_kernel_artifacts() {
+  local manifest_tmp
+
+  [[ -n "${KERNEL_ARCHIVE_NAME}" ]] || { log "Kernel artifact was not produced"; exit 1; }
+  [[ -n "${ZFS_KMOD_ARCHIVE_NAME}" ]] || { log "ZFS kmod artifact was not produced"; exit 1; }
+  [[ -n "${ZFS_USERLAND_ARCHIVE_NAME}" ]] || { log "ZFS userland artifact was not produced"; exit 1; }
+
+  manifest_tmp="${KERNEL_ARTIFACTS_FILE}.tmp"
+  {
+    printf 'build_id=%s\n' "${BUILD_ID}"
+    printf 'arch=%s\n' "${ARCH_NAME}"
+    printf 'kernel_archive=%s\n' "${KERNEL_ARCHIVE_NAME}"
+    printf 'zfs_kmod_archive=%s\n' "${ZFS_KMOD_ARCHIVE_NAME}"
+    printf 'zfs_userland_archive=%s\n' "${ZFS_USERLAND_ARCHIVE_NAME}"
+  } > "${manifest_tmp}"
+  mv "${manifest_tmp}" "${KERNEL_ARTIFACTS_FILE}"
+  log "Published kernel artifact set in ${KERNEL_ARTIFACTS_FILE}"
 }
 
 validate_zfs_kmod_build() {
@@ -804,11 +864,11 @@ run_emerge() {
     restore_kernel_mask
   fi
 
-  if [[ "$(package_key "${atom}")" != "sys-kernel/gentoo-sources" || "${BUILD_PROFILE}" != "kernel" ]]; then
-    archive_from_vdb "${atom}" "${suffix}" "${start}"
-  fi
   if [[ "$(package_key "${atom}")" == "sys-fs/zfs-kmod" && "${BUILD_PROFILE}" == "kernel" ]]; then
     validate_zfs_kmod_build
+  fi
+  if [[ "$(package_key "${atom}")" != "sys-kernel/gentoo-sources" || "${BUILD_PROFILE}" != "kernel" ]]; then
+    archive_from_vdb "${atom}" "${suffix}" "${start}"
   fi
 }
 
@@ -831,7 +891,415 @@ emerge_package() {
   fi
 }
 
+binhost_fail() {
+  log "Binhost error: $*"
+  exit 1
+}
+
+ensure_binhost_log_dirs() {
+  mkdir -p "$(dirname "${CONTAINER_LOG}")" "${EMERGE_LOG_DIR}"
+  touch "${CONTAINER_LOG}" "${TIMES_LOG}"
+}
+
+require_binhost_commands() {
+  local command
+  for command in "$@"; do
+    command -v "${command}" >/dev/null 2>&1 || \
+      binhost_fail "required command is unavailable: ${command}"
+  done
+}
+
+validate_binhost_target() {
+  [[ "${ARCH_NAME}" == "v3" ]] || \
+    binhost_fail "the binhost target requires OXYS_ARCH=v3, got ${ARCH_NAME}"
+  [[ "${MARCH}" == "x86-64-v3" ]] || \
+    binhost_fail "the binhost target requires OXYS_MARCH=x86-64-v3, got ${MARCH}"
+}
+
+validate_binhost_overlay() {
+  local package_dir="${OVERLAY_ROOT}/app-admin/oxys"
+  local manifest_payload payload_version
+  local -a payloads=() ebuilds=()
+
+  [[ -s "${package_dir}/Manifest" ]] || \
+    binhost_fail "missing staged app-admin/oxys Manifest: ${package_dir}/Manifest"
+  manifest_payload="$(awk '$1 == "AUX" && $2 ~ /^oxys-[0-9]/ { print $2 }' \
+    "${package_dir}/Manifest")"
+  if [[ -z "${manifest_payload}" || "${manifest_payload}" == *$'\n'* ]]; then
+    binhost_fail "app-admin/oxys Manifest must contain exactly one versioned oxys AUX payload"
+  fi
+  [[ -x "${package_dir}/files/${manifest_payload}" ]] || \
+    binhost_fail "Manifest payload is missing or not executable: files/${manifest_payload}"
+  payload_version="${manifest_payload#oxys-}"
+  [[ -f "${package_dir}/oxys-${payload_version}.ebuild" ]] || \
+    binhost_fail "files/${manifest_payload} has no matching oxys-${payload_version}.ebuild"
+  mapfile -d '' payloads < <(
+    find "${package_dir}/files" -maxdepth 1 -type f -name 'oxys-*' -print0
+  )
+  (( ${#payloads[@]} == 1 )) || \
+    binhost_fail "app-admin/oxys must contain exactly one versioned files/oxys-* payload"
+  [[ "${payloads[0]}" == "${package_dir}/files/${manifest_payload}" ]] || \
+    binhost_fail "the sole staged payload does not match the Manifest"
+  mapfile -d '' ebuilds < <(
+    find "${package_dir}" -maxdepth 1 -type f -name 'oxys-*.ebuild' -print0
+  )
+  (( ${#ebuilds[@]} == 1 )) || \
+    binhost_fail "app-admin/oxys must contain exactly one versioned ebuild"
+  [[ "${ebuilds[0]}" == "${package_dir}/oxys-${payload_version}.ebuild" ]] || \
+    binhost_fail "the sole ebuild does not match the staged payload version"
+}
+
+select_binhost_profile() {
+  local profile_link="/etc/portage/make.profile"
+  local profile_target="/var/db/repos/gentoo/profiles/${BINHOST_PROFILE_TARGET}"
+
+  [[ -d "${profile_target}" ]] || \
+    binhost_fail "Gentoo no-multilib profile is unavailable: ${profile_target}"
+  rm -f "${profile_link}"
+  ln -s "${profile_target}" "${profile_link}"
+  [[ "$(readlink -f "${profile_link}")" == "${profile_target}" ]] || \
+    binhost_fail "failed to select ${BINHOST_PROFILE_TARGET}"
+}
+
+write_binhost_build_config() {
+  rm -rf "${OXYS_OVERLAY_REPO}"
+  cp -a "${OVERLAY_ROOT}" "${OXYS_OVERLAY_REPO}"
+  mkdir -p /etc/portage/repos.conf
+  cat > "${OXYS_REPOS_CONF_FILE}" <<EOF_REPO
+[oxys]
+location = ${OXYS_OVERLAY_REPO}
+masters = gentoo
+auto-sync = no
+EOF_REPO
+
+  cat > /etc/portage/make.conf <<EOF_MAKE
+COMMON_FLAGS="-O2 -pipe -march=x86-64-v3"
+CFLAGS="\${COMMON_FLAGS}"
+CXXFLAGS="\${COMMON_FLAGS}"
+FCFLAGS="\${COMMON_FLAGS}"
+FFLAGS="\${COMMON_FLAGS}"
+MAKEOPTS="${COMMON_MAKEOPTS}"
+FEATURES="${COMMON_FEATURES} buildpkg -binpkg-signing -binpkg-request-signature"
+BINPKG_FORMAT="gpkg"
+PKGDIR="${BINHOST_UNSIGNED_REPO}"
+ACCEPT_KEYWORDS="${ACCEPT_KEYWORDS_VALUE}"
+EMERGE_DEFAULT_OPTS="--ask=n --verbose --jobs=1 --load-average=$(build_jobs)"
+PORTAGE_BINHOST_HEADER_URI=""
+EOF_MAKE
+}
+
+assert_binhost_build_config() {
+  local abi_x86 chost features format
+  abi_x86="$(portageq envvar ABI_X86)"
+  chost="$(portageq envvar CHOST)"
+  features="$(portageq envvar FEATURES)"
+  format="$(portageq envvar BINPKG_FORMAT)"
+
+  [[ "${abi_x86}" == "64" ]] || \
+    binhost_fail "no-multilib profile resolved ABI_X86='${abi_x86}', expected '64'"
+  [[ "${chost}" == "x86_64-pc-linux-gnu" ]] || \
+    binhost_fail "unexpected binhost CHOST: ${chost}"
+  [[ "${format}" == "gpkg" ]] || \
+    binhost_fail "Portage resolved BINPKG_FORMAT='${format}', expected gpkg"
+  [[ " ${features} " == *" buildpkg "* ]] || \
+    binhost_fail "Portage FEATURES does not enable buildpkg"
+  [[ " ${features} " != *" binpkg-signing "* ]] || \
+    binhost_fail "private-key signing must not be enabled in the emerge builder"
+  [[ " ${features} " != *" binpkg-request-signature "* ]] || \
+    binhost_fail "unsigned build staging unexpectedly requires signatures"
+}
+
+verify_gpkg() {
+  local package_path="$1"
+  local expected_state="$2"
+
+  python3 - "${package_path}" "${expected_state}" <<'PY_VERIFY'
+import sys
+
+import portage
+
+portage._internal_caller = True
+from portage.gpkg import gpkg
+
+package_path, expected_state = sys.argv[1:]
+expect_signed = expected_state == "signed"
+package = gpkg(
+    settings=portage.settings,
+    gpkg_file=package_path,
+    verify_signature=expect_signed,
+)
+package._verify_binpkg()
+if bool(package.signature_exist) != expect_signed:
+    state = "signed" if package.signature_exist else "unsigned"
+    raise SystemExit(f"{package_path} is {state}, expected {expected_state}")
+PY_VERIFY
+}
+
+validate_binhost_repo() {
+  local repo_root="$1"
+  local expected_state="$2"
+  local package_count indexed_path relative_path repositories
+  local indexed_md5 indexed_sha1 indexed_size actual_md5 actual_sha1 actual_size
+  local -a packages=() binpkg_files=() cpvs=()
+
+  [[ -s "${repo_root}/Packages" ]] || \
+    binhost_fail "native Packages index is missing or empty under ${repo_root}"
+
+  mapfile -d '' packages < <(
+    find "${repo_root}" -type f -name '*.gpkg.tar' -print0
+  )
+  mapfile -d '' binpkg_files < <(
+    find "${repo_root}" -type f \
+      \( -name '*.gpkg.tar' -o -name '*.tbz2' -o -name '*.xpak' \) -print0
+  )
+  (( ${#packages[@]} == 1 )) || \
+    binhost_fail "expected exactly one GPKG under ${repo_root}, found ${#packages[@]}"
+  (( ${#binpkg_files[@]} == 1 )) || \
+    binhost_fail "non-GPKG or extra binary packages exist under ${repo_root}"
+
+  package_count="$(awk '$1 == "PACKAGES:" { print $2 }' "${repo_root}/Packages")"
+  [[ "${package_count}" == "1" ]] || \
+    binhost_fail "Packages must advertise exactly one package, got '${package_count}'"
+  mapfile -t cpvs < <(awk '$1 == "CPV:" { print $2 }' "${repo_root}/Packages")
+  (( ${#cpvs[@]} == 1 )) || \
+    binhost_fail "Packages must contain exactly one CPV entry"
+  [[ "${cpvs[0]}" =~ ^app-admin/oxys-[0-9] ]] || \
+    binhost_fail "Packages contains unexpected CPV: ${cpvs[0]}"
+
+  indexed_path="$(awk '$1 == "PATH:" { print $2 }' "${repo_root}/Packages")"
+  [[ -n "${indexed_path}" && "${indexed_path}" != *$'\n'* ]] || \
+    binhost_fail "Packages must contain exactly one PATH entry"
+  relative_path="${packages[0]#${repo_root}/}"
+  [[ "${indexed_path}" == "${relative_path}" ]] || \
+    binhost_fail "Packages PATH '${indexed_path}' does not match '${relative_path}'"
+
+  repositories="$(awk '$1 == "REPO:" { print $2 }' "${repo_root}/Packages")"
+  [[ "${repositories}" == "oxys" ]] || \
+    binhost_fail "Packages must contain only REPO=oxys, got '${repositories}'"
+
+  indexed_md5="$(awk '$1 == "MD5:" { print $2 }' "${repo_root}/Packages")"
+  indexed_sha1="$(awk '$1 == "SHA1:" { print $2 }' "${repo_root}/Packages")"
+  indexed_size="$(awk '$1 == "SIZE:" { print $2 }' "${repo_root}/Packages")"
+  actual_md5="$(md5sum "${packages[0]}")"
+  actual_md5="${actual_md5%% *}"
+  actual_sha1="$(sha1sum "${packages[0]}")"
+  actual_sha1="${actual_sha1%% *}"
+  actual_size="$(stat -c '%s' "${packages[0]}")"
+  [[ "${indexed_md5,,}" == "${actual_md5}" ]] || \
+    binhost_fail "Packages MD5 does not match the indexed GPKG"
+  [[ "${indexed_sha1,,}" == "${actual_sha1}" ]] || \
+    binhost_fail "Packages SHA1 does not match the indexed GPKG"
+  [[ "${indexed_size}" == "${actual_size}" ]] || \
+    binhost_fail "Packages SIZE does not match the indexed GPKG"
+
+  verify_gpkg "${packages[0]}" "${expected_state}" || \
+    binhost_fail "${expected_state} GPKG verification failed: ${packages[0]}"
+  log "Validated ${expected_state} one-package GPKG repository at ${repo_root}"
+}
+
+run_binhost_build() {
+  local build_start build_end
+
+  ensure_binhost_log_dirs
+  validate_binhost_target
+  if [[ -n "${BINHOST_SIGNING_SOURCE}" || -n "${BINHOST_SIGNING_KEY}" ]]; then
+    binhost_fail "signing key material must not enter the privileged emerge builder"
+  fi
+  require_binhost_commands awk emaint emerge find md5sum portageq python3 \
+    sha1sum stat tee
+  validate_binhost_overlay
+
+  rm -rf "${BINHOST_UNSIGNED_REPO}" "${BINHOST_SIGNED_REPO}"
+  mkdir -p "${BINHOST_UNSIGNED_REPO}"
+  select_binhost_profile
+  write_binhost_build_config
+  assert_binhost_build_config
+
+  build_start="$(date +%s)"
+  log "Building isolated unsigned ${BINHOST_ATOM} GPKG candidate"
+  emerge \
+    --ignore-default-opts \
+    --ask=n \
+    --verbose \
+    --oneshot \
+    --buildpkgonly \
+    --nodeps \
+    --usepkg=n \
+    "${BINHOST_ATOM}" 2>&1 | tee "${EMERGE_LOG_DIR}/app-admin--oxys-binhost.log"
+  emaint binhost --fix 2>&1 | tee -a "${EMERGE_LOG_DIR}/app-admin--oxys-binhost.log"
+  emaint binhost --check 2>&1 | tee -a "${EMERGE_LOG_DIR}/app-admin--oxys-binhost.log"
+  validate_binhost_repo "${BINHOST_UNSIGNED_REPO}" unsigned
+  build_end="$(date +%s)"
+  printf '%s\t%s\t%s\n' "${ARCH_NAME}" "app-admin/oxys (unsigned GPKG)" \
+    "$((build_end - build_start))" >> "${TIMES_LOG}"
+  log "Unsigned binhost candidate is ready for the offline signer"
+}
+
+cleanup_binhost_signer() {
+  case "${BINHOST_SIGNING_ROOT}" in
+    /run/oxys-binpkg-signing.*) rm -rf -- "${BINHOST_SIGNING_ROOT}" ;;
+  esac
+  case "${BINHOST_VERIFY_HOME}" in
+    /run/oxys-binpkg-verify.*) rm -rf -- "${BINHOST_VERIFY_HOME}" ;;
+  esac
+  case "${BINHOST_PUBLISH_STAGE}" in
+    "${BINHOST_PUBLISH_ROOT}"/.x86-64-v3.staging.*)
+      rm -rf -- "${BINHOST_PUBLISH_STAGE}"
+      ;;
+  esac
+}
+
+prepare_binhost_signing_homes() {
+  local fingerprint public_key probe unsafe_entry
+
+  [[ -d "${BINHOST_SIGNING_SOURCE}" ]] || \
+    binhost_fail "signing source is not a directory: ${BINHOST_SIGNING_SOURCE}"
+  [[ "${BINHOST_SIGNING_KEY}" =~ ^[[:xdigit:]]{40}$ ]] || \
+    binhost_fail "signing key must be a full 40-digit hexadecimal fingerprint"
+
+  mkdir -p /run/lock
+  chmod 0755 /run/lock
+  BINHOST_SIGNING_ROOT="$(mktemp -d /run/oxys-binpkg-signing.XXXXXX)"
+  BINHOST_SIGNING_HOME="${BINHOST_SIGNING_ROOT}/private"
+  mkdir -m 0700 "${BINHOST_SIGNING_HOME}"
+  # A normal live GNUPGHOME contains agent sockets. Copy only directories and
+  # regular files so neither those sockets nor symlinks escape the read-only
+  # source mount or make the custody copy fail.
+  (
+    cd "${BINHOST_SIGNING_SOURCE}"
+    find . -xdev \( -type d -o -type f \) -print0 | \
+      tar --null --no-recursion --files-from=- -cf -
+  ) | tar -C "${BINHOST_SIGNING_HOME}" --no-same-owner -xf -
+  unsafe_entry="$(find "${BINHOST_SIGNING_HOME}" -mindepth 1 \
+    \( -type l -o -type p -o -type b -o -type c \) -print -quit)"
+  [[ -z "${unsafe_entry}" ]] || \
+    binhost_fail "copied GnuPG home contains unsupported special entry: ${unsafe_entry}"
+  chmod -R go-rwx "${BINHOST_SIGNING_HOME}"
+  chmod 0700 "${BINHOST_SIGNING_ROOT}" "${BINHOST_SIGNING_HOME}"
+
+  gpg --homedir "${BINHOST_SIGNING_HOME}" --batch --list-secret-keys \
+    "${BINHOST_SIGNING_KEY}" >/dev/null 2>&1 || \
+    binhost_fail "requested signing secret key is unavailable"
+  fingerprint="$(gpg --homedir "${BINHOST_SIGNING_HOME}" --batch --with-colons \
+    --fingerprint "${BINHOST_SIGNING_KEY}" | awk -F: '$1 == "fpr" { print $10; exit }')"
+  [[ "${fingerprint}" =~ ^[[:xdigit:]]{40}$ ]] || \
+    binhost_fail "could not resolve the signing-key fingerprint"
+  [[ "${fingerprint,,}" == "${BINHOST_SIGNING_KEY,,}" ]] || \
+    binhost_fail "signing key must identify the primary release-key fingerprint"
+
+  BINHOST_VERIFY_HOME="$(mktemp -d /run/oxys-binpkg-verify.XXXXXX)"
+  public_key="${BINHOST_SIGNING_ROOT}/release-key.asc"
+  gpg --homedir "${BINHOST_SIGNING_HOME}" --batch --armor \
+    --output "${public_key}" --export "${BINHOST_SIGNING_KEY}"
+  [[ -s "${public_key}" ]] || binhost_fail "failed to export the signing public key"
+  gpg --homedir "${BINHOST_VERIFY_HOME}" --batch --import "${public_key}" >/dev/null 2>&1
+  printf '%s:6:\n' "${fingerprint}" | \
+    gpg --homedir "${BINHOST_VERIFY_HOME}" --batch --import-ownertrust >/dev/null 2>&1
+  gpg --homedir "${BINHOST_VERIFY_HOME}" --batch --check-trustdb >/dev/null 2>&1
+  chmod -R a+rX "${BINHOST_VERIFY_HOME}"
+  chmod 0755 "${BINHOST_VERIFY_HOME}"
+
+  probe="${BINHOST_SIGNING_ROOT}/probe"
+  printf 'OxysOS GPKG signing probe\n' > "${probe}"
+  gpg --homedir "${BINHOST_SIGNING_HOME}" --batch --no-tty --yes \
+    --local-user "${BINHOST_SIGNING_KEY}" --digest-algo SHA512 --armor \
+    --detach-sign --output "${probe}.asc" "${probe}" || \
+    binhost_fail "the release key could not sign a noninteractive probe"
+  gpg --homedir "${BINHOST_VERIFY_HOME}" --batch --no-tty \
+    --verify "${probe}.asc" "${probe}" >/dev/null 2>&1 || \
+    binhost_fail "the signing probe could not be verified"
+}
+
+write_binhost_signer_config() {
+  cat > /etc/portage/make.conf <<EOF_MAKE
+FEATURES="binpkg-signing binpkg-request-signature"
+BINPKG_FORMAT="gpkg"
+PKGDIR="${BINHOST_SIGNED_REPO}"
+PORTAGE_GRPNAME="root"
+BINPKG_GPG_SIGNING_BASE_COMMAND="/usr/bin/flock /run/lock/portage-binpkg-gpg.lock /usr/bin/gpg --sign --armor [PORTAGE_CONFIG]"
+BINPKG_GPG_SIGNING_DIGEST="SHA512"
+BINPKG_GPG_SIGNING_GPG_HOME="${BINHOST_SIGNING_HOME}"
+BINPKG_GPG_SIGNING_KEY="${BINHOST_SIGNING_KEY}"
+BINPKG_GPG_VERIFY_BASE_COMMAND="/usr/bin/gpg --verify --batch --no-tty --no-auto-check-trustdb --status-fd 2 [PORTAGE_CONFIG] [SIGNATURE]"
+BINPKG_GPG_VERIFY_GPG_HOME="${BINHOST_VERIFY_HOME}"
+# The signer has all capabilities dropped, so Portage cannot setuid/setgid.
+# Verification still uses a separate public-only keyring.
+GPG_VERIFY_USER_DROP=""
+GPG_VERIFY_GROUP_DROP=""
+PORTAGE_BINHOST_HEADER_URI=""
+EOF_MAKE
+}
+
+publish_signed_binhost() {
+  local destination
+
+  mkdir -p "${BINHOST_PUBLISH_ROOT}"
+  BINHOST_PUBLISH_STAGE="$(mktemp -d \
+    "${BINHOST_PUBLISH_ROOT}/.${BINHOST_FINAL_DIRNAME}.staging.XXXXXX")"
+  cp -a "${BINHOST_SIGNED_REPO}/." "${BINHOST_PUBLISH_STAGE}/"
+  validate_binhost_repo "${BINHOST_PUBLISH_STAGE}" signed
+
+  destination="${BINHOST_PUBLISH_ROOT}/${BINHOST_FINAL_DIRNAME}"
+  if [[ -e "${destination}" ]]; then
+    mv --help | grep -q -- '--exchange' || \
+      binhost_fail "mv lacks atomic directory exchange support"
+    # renameat2(RENAME_EXCHANGE) leaves no interval where the public path is
+    # absent. After the exchange, the old repository occupies the hidden
+    # staging path and can be removed independently.
+    mv --exchange -T "${BINHOST_PUBLISH_STAGE}" "${destination}" || \
+      binhost_fail "atomic exchange failed for ${destination}"
+    rm -rf "${BINHOST_PUBLISH_STAGE}"
+  else
+    mv -T "${BINHOST_PUBLISH_STAGE}" "${destination}" || \
+      binhost_fail "atomic initial publication failed for ${destination}"
+  fi
+  BINHOST_PUBLISH_STAGE=""
+  log "Published signed binhost at ${destination}"
+}
+
+run_binhost_signer() {
+  local -a packages=()
+
+  ensure_binhost_log_dirs
+  validate_binhost_target
+  require_binhost_commands awk chmod cp emaint find flock gpg gpkg-sign grep \
+    md5sum mktemp mv python3 sha1sum stat tar
+  [[ -d "${BINHOST_UNSIGNED_REPO}" ]] || \
+    binhost_fail "unsigned builder output is missing: ${BINHOST_UNSIGNED_REPO}"
+  validate_binhost_repo "${BINHOST_UNSIGNED_REPO}" unsigned
+
+  trap cleanup_binhost_signer EXIT
+  prepare_binhost_signing_homes
+  rm -rf "${BINHOST_SIGNED_REPO}"
+  mkdir -p "${BINHOST_SIGNED_REPO}"
+  cp -a "${BINHOST_UNSIGNED_REPO}/." "${BINHOST_SIGNED_REPO}/"
+  write_binhost_signer_config
+
+  mapfile -d '' packages < <(
+    find "${BINHOST_SIGNED_REPO}" -type f -name '*.gpkg.tar' -print0
+  )
+  (( ${#packages[@]} == 1 )) || \
+    binhost_fail "signer requires exactly one staged GPKG"
+  log "Signing ${packages[0]} with the isolated release key"
+  gpkg-sign --allow-unsigned "${packages[0]}"
+  emaint binhost --fix
+  emaint binhost --check
+  validate_binhost_repo "${BINHOST_SIGNED_REPO}" signed
+  publish_signed_binhost
+}
+
 main() {
+  case "${BUILD_PROFILE}" in
+    binhost-build)
+      run_binhost_build
+      return
+      ;;
+    binhost-sign)
+      run_binhost_signer
+      return
+      ;;
+  esac
+
   ensure_dirs
   resolve_graphics_policy
   ensure_profile
@@ -845,6 +1313,10 @@ main() {
     [[ -z "${atom}" ]] && continue
     run_emerge "${atom}"
   done < <(build_package_queue)
+
+  if [[ "${BUILD_PROFILE}" == "kernel" ]]; then
+    publish_kernel_artifacts
+  fi
 
   log "Build profile ${BUILD_PROFILE} for ${ARCH_NAME} completed"
 }

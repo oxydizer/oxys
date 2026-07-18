@@ -32,7 +32,7 @@ WORK="${REPO_DIR}/.build"
 SPECS_SRC="${REPO_DIR}/specs"
 GIT_SOURCES_FILE="${REPO_DIR}/git-sources.conf"
 
-# Monorepo root (oxys-iso's parent dir). oxys-build's tagged kernel/zfs-kmod
+# Monorepo root (oxys-iso's parent dir). oxys-build's kernel/zfs-kmod
 # output lives at ${MONOREPO_ROOT}/oxys-build/output/<arch>/ — see
 # scripts/resolve-kernel-build.sh.
 MONOREPO_ROOT="$(cd "${REPO_DIR}/.." && pwd)"
@@ -116,9 +116,8 @@ fi
 # Which oxys-build arch output to pull the prebuilt kernel+zfs-kmod from.
 # Required, no default: this is a hardware-targeted kernel build, and
 # silently picking one would be exactly the kind of implicit-default footgun
-# this project is otherwise trying to avoid (see doc.md). Default build-id
-# within that arch is oxys-build's own "current build" pointer, see
-# scripts/resolve-kernel-build.sh.
+# this project is otherwise trying to avoid (see doc.md). The artifact set for
+# that arch is published atomically by oxys-build; see resolve-kernel-build.sh.
 if [[ -z "${OXYS_ARCH:-}" ]]; then
 	echo "ERROR: OXYS_ARCH is required (e.g. OXYS_ARCH=alderlake)." >&2
 	echo "       Available arches: $(find "${MONOREPO_ROOT}/oxys-build/output" -mindepth 1 -maxdepth 1 -type d -printf '%f ' 2>/dev/null || echo '(none -- run oxys-build first)')" >&2
@@ -194,25 +193,74 @@ if [[ ! -f "${INSTALLER_BIN}" ]]; then
 fi
 echo ">> installer overlay binary to be baked in: sha256 $(sha256sum "${INSTALLER_BIN}" | cut -c1-16)… ($(stat -c%s "${INSTALLER_BIN}") bytes)"
 
-# --- sanity: oxys CLI present? ----------------------------------------------
-# The `oxys` package-manager CLI is baked into /usr/local/bin the same way as
-# the installer (built by build-installer-overlay.sh, rsynced by the stage2
-# root_overlay, then onto the target by the installer). Fail fast if it's absent
-# so we never ship an image where `oxys` is missing from PATH.
-OXYS_CLI_BIN="${REPO_DIR}/overlay/usr/local/bin/oxys"
-if [[ ! -f "${OXYS_CLI_BIN}" ]]; then
-	echo "ERROR: overlay/usr/local/bin/oxys is missing." >&2
-	echo "       Run scripts/enter-container.sh build from the host, or install Rust tooling in this environment." >&2
+# --- sanity: Portage-owned oxys CLI package present? ------------------------
+# The host wrapper stages a static CLI in the canonical app-admin/oxys ebuild
+# and mirrors that package into the ISO before catalyst starts. Stage1 emerges
+# it into /usr/bin, making the updater VDB-owned instead of leaving a raw binary
+# in /usr/local/bin where it would shadow future package updates.
+OXYS_PACKAGE_VERSION="$(awk '
+	$0 == "[package]" { package = 1; next }
+	package && /^\[/ { exit }
+	package && /^version[[:space:]]*=/ {
+		value = $0
+		sub(/^[^=]*=[[:space:]]*"/, "", value)
+		sub(/"[[:space:]]*$/, "", value)
+		print value
+		exit
+	}
+' "${MONOREPO_ROOT}/oxys/Cargo.toml")"
+if [[ -z ${OXYS_PACKAGE_VERSION} ]]; then
+	echo "ERROR: could not read the Oxys package version from oxys/Cargo.toml." >&2
 	exit 1
 fi
-echo ">> oxys CLI to be baked in: sha256 $(sha256sum "${OXYS_CLI_BIN}" | cut -c1-16)… ($(stat -c%s "${OXYS_CLI_BIN}") bytes)"
+OXYS_PACKAGE_DIR="${MONOREPO_ROOT}/oxys-build/oxys-overlay/app-admin/oxys"
+OXYS_PACKAGE_PAYLOAD="${OXYS_PACKAGE_DIR}/files/oxys-${OXYS_PACKAGE_VERSION}"
+OXYS_PACKAGE_EBUILD="${OXYS_PACKAGE_DIR}/oxys-${OXYS_PACKAGE_VERSION}.ebuild"
+OXYS_ISO_PACKAGE_DIR="${REPO_DIR}/overlay/var/db/repos/oxys/app-admin/oxys"
+
+for required in "${OXYS_PACKAGE_PAYLOAD}" "${OXYS_PACKAGE_EBUILD}" "${OXYS_PACKAGE_DIR}/Manifest"; do
+	if [[ ! -f "${required}" ]]; then
+		echo "ERROR: staged app-admin/oxys input is missing: ${required}" >&2
+		echo "       Run scripts/enter-container.sh build from the Rust-capable host." >&2
+		exit 1
+	fi
+done
+shopt -s nullglob
+oxys_package_ebuilds=("${OXYS_PACKAGE_DIR}"/oxys-*.ebuild)
+oxys_package_payloads=("${OXYS_PACKAGE_DIR}"/files/oxys-*)
+shopt -u nullglob
+if (( ${#oxys_package_ebuilds[@]} != 1 )) || \
+   [[ ${oxys_package_ebuilds[0]:-} != "${OXYS_PACKAGE_EBUILD}" ]]; then
+	echo "ERROR: app-admin/oxys must contain exactly one ebuild for ${OXYS_PACKAGE_VERSION}." >&2
+	exit 1
+fi
+if (( ${#oxys_package_payloads[@]} != 1 )) || \
+   [[ ${oxys_package_payloads[0]:-} != "${OXYS_PACKAGE_PAYLOAD}" ]]; then
+	echo "ERROR: app-admin/oxys must contain exactly one staged payload for ${OXYS_PACKAGE_VERSION}." >&2
+	exit 1
+fi
+if [[ -e "${REPO_DIR}/overlay/usr/local/bin/oxys" ]]; then
+	echo "ERROR: obsolete overlay/usr/local/bin/oxys would shadow /usr/bin/oxys." >&2
+	echo "       Remove it and rerun scripts/build-installer-overlay.sh." >&2
+	exit 1
+fi
+if ! diff -qr "${OXYS_PACKAGE_DIR}" "${OXYS_ISO_PACKAGE_DIR}" >/dev/null; then
+	echo "ERROR: ISO app-admin/oxys package differs from its canonical build-overlay copy." >&2
+	echo "       Rerun scripts/build-installer-overlay.sh to synchronize it." >&2
+	exit 1
+fi
+if [[ "$("${OXYS_PACKAGE_PAYLOAD}" --version)" != "oxys ${OXYS_PACKAGE_VERSION}" ]]; then
+	echo "ERROR: staged app-admin/oxys payload version does not match its ebuild." >&2
+	exit 1
+fi
+echo ">> app-admin/oxys-${OXYS_PACKAGE_VERSION} payload: sha256 $(sha256sum "${OXYS_PACKAGE_PAYLOAD}" | cut -c1-16)… ($(stat -c%s "${OXYS_PACKAGE_PAYLOAD}") bytes)"
 
 # --- sanity: does a valid, paired kernel+zfs-kmod build exist for the
-#     requested arch/build-id? Fail fast here, before catalyst even starts,
+#     requested arch? Fail fast here, before catalyst even starts,
 #     rather than failing deep inside a stage2 run (or worse, silently
 #     letting catalyst build its own kernel). ---------------------------------
 if ! KERNEL_BUILD_VARS="$("${REPO_DIR}/scripts/resolve-kernel-build.sh")"; then
-	echo "ERROR: no valid prebuilt kernel+zfs-kmod build found for OXYS_ARCH=${OXYS_ARCH}${OXYS_KERNEL_BUILD_ID:+ OXYS_KERNEL_BUILD_ID=${OXYS_KERNEL_BUILD_ID}}." >&2
+	echo "ERROR: no valid prebuilt kernel+zfs-kmod build found for OXYS_ARCH=${OXYS_ARCH}." >&2
 	echo "       (see the resolve-kernel-build.sh error above). Run oxys-build for" >&2
 	echo "       this arch first: ${MONOREPO_ROOT}/oxys-build/" >&2
 	exit 1

@@ -18,7 +18,6 @@
 #   OXYS_REBUILD=1      Force rebuild of the image before entering.
 #   OXYS_ARCH           Forwarded into the container for build.sh (required by
 #                        build.sh; no default here — see oxys-iso/README.md).
-#   OXYS_KERNEL_BUILD_ID Forwarded into the container for build.sh (optional).
 #   OXYS_GRAPHICS_MANIFEST Generated manifest.toml used to derive matching
 #                        Mesa and kernel DRM build inputs before entering.
 #   OXYS_TREEISH        Forwarded into the container for build.sh (optional).
@@ -109,7 +108,6 @@ exec "${PODMAN[@]}" run --privileged --rm -it \
     -v "${CATALYST_DIR}:/var/tmp/catalyst:Z" \
     "${GRAPHICS_ENV_ARGS[@]}" \
     ${OXYS_ARCH:+-e OXYS_ARCH="${OXYS_ARCH}"} \
-    ${OXYS_KERNEL_BUILD_ID:+-e OXYS_KERNEL_BUILD_ID="${OXYS_KERNEL_BUILD_ID}"} \
     ${OXYS_TREEISH:+-e OXYS_TREEISH="${OXYS_TREEISH}"} \
     ${OXYS_STAGE1_PACKAGES:+-e OXYS_STAGE1_PACKAGES="${OXYS_STAGE1_PACKAGES}"} \
     ${OXYS_STAGE1_ONLY:+-e OXYS_STAGE1_ONLY="${OXYS_STAGE1_ONLY}"} \

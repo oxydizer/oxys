@@ -40,9 +40,7 @@ fn collect_zones(dir: &Path, prefix: &str, depth: usize, zones: &mut Vec<String>
         };
         // Real zone components start with an uppercase letter; everything
         // else (leapseconds, tzdata.zi, zone.tab, posixrules, ...) is data.
-        if !name.starts_with(|c: char| c.is_ascii_uppercase())
-            || SKIP_NAMES.contains(&name)
-        {
+        if !name.starts_with(|c: char| c.is_ascii_uppercase()) || SKIP_NAMES.contains(&name) {
             continue;
         }
         let zone = if prefix.is_empty() {

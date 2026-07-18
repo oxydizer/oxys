@@ -38,8 +38,7 @@ pub enum March {
 
 impl Default for March {
     fn default() -> Self {
-        // x86-64-v3 is the widest baseline Gentoo's official binhost ships as
-        // stable, so binary packages are available for it out of the box.
+        // x86-64-v3 is the default OxysOS package baseline.
         // `Native` opts out of the binhost entirely (see `binhost_url`) and
         // forces everything to build from source.
         Self::X86_64V3
@@ -63,9 +62,9 @@ impl March {
         format!("-march={}", self.value())
     }
 
-    /// Gentoo's official binhost URI for this baseline, or `None` for
-    /// `Native` — there is no official binhost for a machine-specific march,
-    /// so only local compilation makes sense.
+    /// OxysOS package and kernel binhosts for this baseline, or `None` for
+    /// `Native` — there is no binhost for a machine-specific march, so only
+    /// local compilation makes sense.
     pub fn binhost_url(&self) -> Option<String> {
         let path = match self {
             March::Native => return None,
@@ -75,7 +74,7 @@ impl March {
             March::X86_64V4 => "x86-64-v4",
         };
         Some(format!(
-            "https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/{path}/"
+            "https://packages.oxysos.org/{path}/ https://kernel.oxysos.org/{path}/"
         ))
     }
 }
@@ -91,14 +90,15 @@ pub struct Compiler {
     /// CFLAGS/CXXFLAGS. Default: `March::X86_64V3`.
     pub march: March,
     /// Binary package host queried with `--getbinpkg` before building from
-    /// source. `None` disables binpkg fetching entirely. Default: Gentoo's
-    /// official binhost matching `march`.
+    /// source. Multiple hosts are separated by spaces. `None` disables binpkg
+    /// fetching entirely. Default: the OxysOS package and kernel binhosts
+    /// matching `march`.
     pub binhost: Option<String>,
     /// Linker flags. Default includes "-fuse-ld=mold"
     pub ldflags: String,
     /// Number of parallel make jobs. Default: number of logical CPUs.
     pub makeopts_jobs: usize,
-    /// Number of parallel emerge jobs. Default: 2
+    /// Number of parallel emerge jobs. Default: number of logical CPUs.
     pub emerge_jobs: usize,
     /// Enable ccache for faster rebuilds.
     pub ccache: bool,
@@ -117,7 +117,7 @@ impl Default for Compiler {
             march,
             ldflags: "-fuse-ld=mold".to_owned(),
             makeopts_jobs: jobs,
-            emerge_jobs: 2,
+            emerge_jobs: jobs,
             ccache: true,
             optimisation: BuildOptimisation::default(),
         }

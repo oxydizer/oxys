@@ -5,7 +5,7 @@ use oxys::{
     InitSystem, ProvisionEvent, SystemInstallEvent, apply_disk_plan, apply_system_install_plan,
     compile::{compile_config_file, oxys_crate_path},
     config_source::add_package_to_source,
-    plan_disk, plan_system_install, preflight,
+    plan_disk_with_swap, plan_system_install, preflight_with_swap,
 };
 
 use super::{apply::apply_manifest, manifest_io::effective_system_config_path};
@@ -294,8 +294,13 @@ fn install_system(
             .cyan()
             .bold()
     );
-    preflight(&desired.disk)?;
-    let plan = plan_disk(&desired.disk, Path::new(DEFAULT_TARGET_MOUNT))?;
+    let resolved_swap = desired.resolved_swap()?;
+    preflight_with_swap(&desired.disk, &resolved_swap)?;
+    let plan = plan_disk_with_swap(
+        &desired.disk,
+        &resolved_swap,
+        Path::new(DEFAULT_TARGET_MOUNT),
+    )?;
     print_disk_plan(&plan);
     confirm_disk_plan(&plan.device, confirm)?;
     println!("{}", "Provisioning disk".yellow().bold());

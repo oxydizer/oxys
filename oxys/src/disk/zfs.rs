@@ -1,9 +1,9 @@
 use std::path::Path;
 
-use crate::manifest::{Disk, SwapConfig, ZfsDataset};
+use crate::manifest::{Disk, ResolvedSwap, ZfsDataset};
 
 use super::apply::partition_path;
-use super::{mib, swap_partition_step, DiskError, DiskStep};
+use super::{DiskError, DiskStep, mib, swap_partition_step};
 
 pub(super) fn plan_zfs(
     disk: &Disk,
@@ -230,11 +230,11 @@ pub(super) fn plan_zfs(
     Ok(())
 }
 
-pub(super) fn zfs_swap_partition(disk: &Disk, number: usize) -> Option<(usize, u64)> {
-    match disk.partitions.swap {
-        SwapConfig::Partition { size } => Some((number, size)),
-        SwapConfig::Zram { .. } | SwapConfig::None | SwapConfig::File { .. } => None,
-    }
+pub(super) fn zfs_swap_partition(
+    resolved_swap: &ResolvedSwap,
+    number: usize,
+) -> Option<(usize, u64)> {
+    resolved_swap.disk.as_ref().map(|swap| (number, swap.size))
 }
 
 fn normalize_mountpoint(mount: &str) -> Result<String, DiskError> {

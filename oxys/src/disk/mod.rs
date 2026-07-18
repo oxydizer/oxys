@@ -6,7 +6,9 @@ use std::{
 use thiserror::Error;
 
 use crate::exec::{CommandStep, ExecError, StepEvent, StepStream};
-use crate::manifest::{Disk, DiskLayout, Encryption, MB};
+use crate::manifest::{
+    Disk, DiskLayout, Encryption, MB, ResolvedSwap, SwapResolveError, SystemManifest,
+};
 
 mod apply;
 mod ext4;
@@ -14,7 +16,7 @@ mod preflight;
 mod zfs;
 
 pub use apply::{apply_disk_plan, release_target_mounts};
-pub use preflight::{preflight, MIN_INSTALL_BYTES};
+pub use preflight::{MIN_INSTALL_BYTES, preflight, preflight_with_swap};
 
 pub type DiskStep = CommandStep;
 
@@ -76,10 +78,25 @@ pub enum DiskError {
     #[error("invalid disk layout: {0}")]
     InvalidLayout(String),
     #[error(transparent)]
+    InvalidSwap(#[from] SwapResolveError),
+    #[error(transparent)]
     Exec(#[from] ExecError),
 }
 
 pub fn plan_disk(disk: &Disk, target_mount: &Path) -> Result<DiskPlan, DiskError> {
+    let manifest = SystemManifest {
+        disk: disk.clone(),
+        ..SystemManifest::default()
+    };
+    let resolved_swap = manifest.resolved_swap()?;
+    plan_disk_with_swap(disk, &resolved_swap, target_mount)
+}
+
+pub fn plan_disk_with_swap(
+    disk: &Disk,
+    resolved_swap: &ResolvedSwap,
+    target_mount: &Path,
+) -> Result<DiskPlan, DiskError> {
     if disk.device.trim().is_empty() {
         return Err(DiskError::MissingDevice);
     }
@@ -112,7 +129,7 @@ pub fn plan_disk(disk: &Disk, target_mount: &Path) -> Result<DiskPlan, DiskError
 
     let swap_part = match disk.layout {
         DiskLayout::Zfs => {
-            let zfs_swap = zfs::zfs_swap_partition(disk, next_part + 1);
+            let zfs_swap = zfs::zfs_swap_partition(resolved_swap, next_part + 1);
             let rpool_part_number = if zfs_swap.is_some() {
                 next_part + 2
             } else {
@@ -131,7 +148,8 @@ pub fn plan_disk(disk: &Disk, target_mount: &Path) -> Result<DiskPlan, DiskError
             swap_part
         }
         DiskLayout::Ext4 => {
-            let swap_part = ext4::plan_swap_partition(disk, &device, &mut steps, &mut next_part);
+            let swap_part =
+                ext4::plan_swap_partition(resolved_swap, &device, &mut steps, &mut next_part);
             ext4::plan_ext4(disk, target_mount, &device, &mut steps, next_part)?;
             swap_part
         }
@@ -233,7 +251,10 @@ mod tests {
     use std::path::Path;
 
     use super::*;
-    use crate::manifest::{Disk, DiskLayout, DiskPartitions, Encryption, SwapConfig, GB};
+    use crate::manifest::{
+        Compression, Disk, DiskLayout, DiskPartitions, Encryption, GB, ResolvedDiskSwap,
+        ResolvedSwap, ResolvedZram, SwapConfig,
+    };
 
     #[test]
     fn plan_disk_refuses_encryption_until_luks_is_wired() {
@@ -293,13 +314,45 @@ mod tests {
         assert!(rendered.contains("sgdisk -n 4:0:0 -t 4:bf00 /dev/nvme0n1"));
         assert!(rendered.contains("zpool create -f -o ashift=12 -o autotrim=on -O compression=zstd -O acltype=posixacl -O xattr=sa -O atime=off -O normalization=formD -O dnodesize=auto -O canmount=off -O mountpoint=none -R /mnt/oxys rpool /dev/nvme0n1p4"));
         assert!(rendered.contains("zpool create -f -o compatibility=grub2 -o ashift=12 -o autotrim=on -O compression=lz4 -O acltype=posixacl -O xattr=sa -O devices=off -O atime=off -O canmount=off -O mountpoint=/boot -R /mnt/oxys bpool /dev/nvme0n1p2"));
-        assert!(rendered.contains("zfs create -p -o mountpoint=/ -o canmount=noauto rpool/ROOT/os"));
+        assert!(
+            rendered.contains("zfs create -p -o mountpoint=/ -o canmount=noauto rpool/ROOT/os")
+        );
         assert!(rendered.contains("zfs mount rpool/ROOT/os"));
-        assert!(rendered.contains("zfs create -p -o mountpoint=/boot -o canmount=on bpool/BOOT/os"));
-        assert!(rendered.contains("zfs create -p -o mountpoint=/var/cache/distfiles -o canmount=on rpool/gentoo/distfiles"));
+        assert!(
+            rendered.contains("zfs create -p -o mountpoint=/boot -o canmount=on bpool/BOOT/os")
+        );
+        assert!(rendered.contains(
+            "zfs create -p -o mountpoint=/var/cache/distfiles -o canmount=on rpool/gentoo/distfiles"
+        ));
         assert!(rendered.contains("zpool set bootfs=rpool/ROOT/os rpool"));
         assert!(rendered.contains("zpool set cachefile=/mnt/oxys/etc/zfs/zpool.cache rpool"));
         assert!(rendered.contains("zpool set cachefile=/mnt/oxys/etc/zfs/zpool.cache bpool"));
+    }
+
+    #[test]
+    fn hybrid_swap_adds_one_disk_partition() {
+        let disk = Disk {
+            device: "/dev/nvme0n1".to_owned(),
+            ..Disk::default()
+        };
+        let swap = ResolvedSwap {
+            zram: Some(ResolvedZram {
+                size: 8 * GB,
+                algorithm: Compression::Zstd,
+                priority: 100,
+            }),
+            disk: Some(ResolvedDiskSwap {
+                size: 4 * GB,
+                priority: 10,
+            }),
+            swappiness: 180,
+        };
+
+        let rendered = plan_disk_with_swap(&disk, &swap, Path::new("/mnt/oxys"))
+            .unwrap()
+            .render();
+        assert!(rendered.contains("sgdisk -n 2:0:+4096M -t 2:8200 /dev/nvme0n1"));
+        assert!(rendered.contains("sgdisk -n 3:0:0 -t 3:8300 /dev/nvme0n1"));
     }
 
     #[test]

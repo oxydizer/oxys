@@ -169,7 +169,7 @@ fn materialization_merges_requirements_without_duplicates() {
     let resolved = manifest.resolved_session().unwrap();
     let materialized = resolved.materialize_manifest(&manifest);
     assert!(has_package(&materialized, "gui-wm/niri"));
-    assert!(materialized.services.enabled.contains(&"seatd".to_owned()));
+    assert!(!materialized.services.enabled.contains(&"seatd".to_owned()));
     assert!(materialized.users[0].groups.contains(&"video".to_owned()));
     assert_eq!(
         materialized

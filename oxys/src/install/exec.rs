@@ -54,8 +54,18 @@ fn run_step(
         SystemInstallStep::ResolveKernelCmdline { .. } => {}
         SystemInstallStep::Command { .. } => unreachable!("command steps return above"),
         SystemInstallStep::GenerateFstab {
-            disk, target_mount, ..
-        } => filesystem::write_fstab(disk, target_mount)?,
+            disk,
+            resolved_swap,
+            target_mount,
+            ..
+        } => filesystem::write_fstab(disk, resolved_swap, target_mount)?,
+        SystemInstallStep::ConfigureSwap {
+            resolved_swap,
+            target_mount,
+            ..
+        } => {
+            crate::runtime::sync_swap_config(resolved_swap, target_mount)?;
+        }
         SystemInstallStep::ResetMachineId { target_mount, .. } => {
             filesystem::reset_machine_id(target_mount)?
         }
@@ -118,19 +128,13 @@ fn run_step(
             resolved_graphics,
             target_mount,
             ..
-        } => login::setup_login(
-            manifest,
-            resolved,
-            resolved_graphics,
-            target_mount,
-            sender,
-        )?,
+        } => login::setup_login(manifest, resolved, resolved_graphics, target_mount, sender)?,
         SystemInstallStep::ConfigureGraphicsRuntime {
             manifest,
             target_mount,
             ..
         } => {
-            crate::runtime::sync_runtime_config(manifest, target_mount)?;
+            crate::runtime::sync_graphics_runtime_config(manifest, target_mount)?;
         }
         SystemInstallStep::GenerateInitramfs {
             target_mount,
@@ -146,9 +150,10 @@ fn run_step(
         } => filesystem::seed_oxys_config(source_fe2o3.as_deref(), manifest, target_mount)?,
         SystemInstallStep::Finalize {
             manifest,
+            resolved_swap,
             target_mount,
             ..
-        } => host::finalize_install(manifest, target_mount, sender)?,
+        } => host::finalize_install(manifest, resolved_swap, target_mount, sender)?,
     }
 
     let _ = sender.send(SystemInstallEvent::StepComplete { description });
@@ -191,6 +196,7 @@ pub(super) fn boot_rsync_args(source: &str, target: &str) -> Vec<String> {
     vec![
         "-aHAX".to_owned(),
         "--numeric-ids".to_owned(),
+        "--info=progress2".to_owned(),
         "--exclude=/efi/*".to_owned(),
         source.to_owned(),
         target.to_owned(),

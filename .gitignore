@@ -2,3 +2,10 @@ target/
 output/
 .claude/
 .oxys/
+
+# Generated app-admin/oxys release payload and thin Manifest. The host staging
+# helper rebuilds these before each ISO build and mirrors them into the ISO.
+/oxys-build/oxys-overlay/app-admin/oxys/files/oxys-*
+/oxys-build/oxys-overlay/app-admin/oxys/Manifest
+/oxys-iso/overlay/var/db/repos/oxys/app-admin/oxys/files/oxys-*
+/oxys-iso/overlay/var/db/repos/oxys/app-admin/oxys/Manifest

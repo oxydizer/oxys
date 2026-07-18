@@ -43,10 +43,11 @@ portage_confdir: @PORTAGE_CONFDIR@
 # Extra ebuild repositories mounted into the build chroot so we can BAKE the
 # default desktop into the image (rsync'd to the target -- the flawless path;
 # on-target emerge is then only for packages a user adds). GURU carries niri +
-# the small Wayland tools; the oxys overlay carries gui-shells/noctalia. Both
-# also ship to the target via the root overlay (see /var/db/repos in overlay/)
-# so user-added overlay packages can build there too. GURU is cloned into the
-# overlay by build-installer-overlay.sh before catalyst runs.
+# the small Wayland tools; the oxys overlay carries gui-shells/noctalia and the
+# Portage-owned app-admin/oxys CLI. Both also ship to the target via the root
+# overlay (see /var/db/repos in overlay/) so user-added overlay packages can
+# build there too. GURU is cloned into the overlay by
+# build-installer-overlay.sh before catalyst runs.
 repos: @REPO_DIR@/overlay/var/db/repos/guru @REPO_DIR@/overlay/var/db/repos/oxys
 
 # USE flags for everything merged into the live env.
@@ -97,6 +98,7 @@ livecd/packages:
 	sys-block/parted
 	sys-apps/gptfdisk
 	sys-apps/util-linux
+	sys-block/zram-init
 	sys-fs/dosfstools
 	sys-fs/e2fsprogs
 
@@ -140,6 +142,12 @@ livecd/packages:
 	#     offline builds on the target. ---
 	dev-lang/rust-bin
 	sys-devel/gcc
+
+	# --- OxysOS system manager: built as a static musl CLI and staged in the
+	#     canonical first-party overlay before catalyst starts. Emerging it here
+	#     installs /usr/bin/oxys with a real app-admin/oxys VDB entry, which is
+	#     required for updater self-bootstrapping and safe re-exec. ---
+	app-admin/oxys
 
 	# --- user provisioning: the installer creates the configured user
 	#     accounts on the target and writes /etc/sudoers.d/wheel for any
@@ -196,6 +204,7 @@ livecd/packages:
 	app-portage/gentoolkit
 	dev-vcs/git
 	net-misc/curl
+	app-misc/fastfetch
 
 	# --- default desktop stack, BAKED into the image (rsync'd to the target, so
 	#     the default install needs no live emerge). Built here against the

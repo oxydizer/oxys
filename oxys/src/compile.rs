@@ -13,7 +13,7 @@ use std::{
     process::Command,
 };
 
-use crate::{parse_generated_manifest_toml, SystemManifest};
+use crate::{SystemManifest, parse_generated_manifest_toml};
 
 /// Default location of the `oxys` crate source used to compile configs.
 pub const DEFAULT_OXYS_CRATE_PATH: &str = "/usr/src/oxys";
@@ -319,10 +319,7 @@ oxys::main!(config);
     #[test]
     fn broken_config_returns_error_with_output() {
         let tmp = tempfile::tempdir().unwrap();
-        let config = write_config(
-            tmp.path(),
-            "this is not valid rust at all;\n",
-        );
+        let config = write_config(tmp.path(), "this is not valid rust at all;\n");
         let out = tempfile::tempdir().unwrap();
         let build = tempfile::tempdir().unwrap();
         let tree = tempfile::tempdir().unwrap();
@@ -403,8 +400,7 @@ oxys::main!(config);
         .expect_err("unknown package should fail the compile");
         assert_eq!(err.stage, CompileStage::UnknownPackages);
         assert!(
-            err.output
-                .contains("did you mean 'gui-apps/wl-clipboard'"),
+            err.output.contains("did you mean 'gui-apps/wl-clipboard'"),
             "output should carry the suggestion, got: {}",
             err.output
         );

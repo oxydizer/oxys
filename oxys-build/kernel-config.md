@@ -160,6 +160,32 @@ CONFIG_SOUND_OSS_CORE=n          # OSS dead, we use PipeWire
 CONFIG_SND_OSSEMUL=n
 
 # ============================================================
+# AUDIO — ALSA + PipeWire
+# ============================================================
+# CONFIG_SOUND=y is the top-level gate; without it the entire ALSA subsystem
+# is absent and PipeWire cannot open any audio device.
+CONFIG_SOUND=y
+CONFIG_SND=y
+CONFIG_SND_TIMER=y
+CONFIG_SND_PCM=y
+CONFIG_SND_RAWMIDI=y
+CONFIG_SND_SEQUENCER=y
+CONFIG_SND_JACK=y
+# HD-Audio covers Intel HDA (including HDMI/DP audio) and AMD HD-Audio.
+CONFIG_SND_HDA_CORE=m
+CONFIG_SND_HDA=m
+CONFIG_SND_HDA_INTEL=m
+CONFIG_SND_HDA_CODEC_HDMI=m
+CONFIG_SND_HDA_CODEC_REALTEK=m
+CONFIG_SND_HDA_CODEC_GENERIC=m
+CONFIG_SND_HDA_POWER_SAVE_DEFAULT=0
+# USB audio: headsets, DACs, class-compliant devices.
+CONFIG_SND_USB_AUDIO=m
+# OSS PCM/sequencer emulation disabled — PipeWire does not need it.
+CONFIG_SND_PCM_OSS=n
+CONFIG_SND_SEQUENCER_OSS=n
+
+# ============================================================
 # BASELINE REQUIREMENTS (Portage sandboxing + modern userspace)
 # ============================================================
 # These are not systemd-specific. They are required by Portage sandbox/cgroup
@@ -191,16 +217,16 @@ CONFIG_BPF_SYSCALL=y
 # ============================================================
 # KERNEL/ZFS OUTPUT PAIRING
 # ============================================================
-# The kernel build profile writes one shared build id per architecture under
-# output/<arch>/build-id. The id is
-# <build-utc>-gentoo-<portage-snapshot-utc>, with both timestamps formatted as
-# YYYYMMDDTHHMMSSZ. Kernel and zfs-kmod archives include that id in their
-# filenames and each archive gets a .metadata sidecar containing build_id,
-# arch, atom, version, and kernel_release.
+# The kernel build profile publishes stable, versioned filenames and records
+# the exact completed set in output/<arch>/kernel-artifacts.env. Each archive
+# gets a .metadata sidecar containing an internal build_id, arch, atom, version,
+# and kernel_release. The internal id is a consistency check, not part of the
+# public filename.
 #
 # Example names:
-#   kernel-alderlake-7.0.14-gentoo-oxys-20260706T010203Z-gentoo-20260705T123752Z.tar.gz
-#   zfs-kmod-alderlake-20260706T010203Z-gentoo-20260705T123752Z-2.3.8.tar.gz
+#   oxys-kernel-6.18.38-v3.tar.gz
+#   oxys-zfs-kmod-2.3.6-v3.tar.gz
+#   oxys-zfs-2.3.6-v3.tar.gz
 #
 # During the kernel build profile, zfs-kmod is validated after emerge by
 # checking that zfs.ko exists under the exact /lib/modules/<kernel_release>

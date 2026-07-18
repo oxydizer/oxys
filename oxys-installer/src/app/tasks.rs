@@ -104,10 +104,9 @@ impl App {
     /// Compile the selected config into a manifest on a blocking worker. Drives
     /// the `ConfigValidate` → `Confirm`/`ConfigError` transition via `poll_streams`.
     ///
-    /// Always goes through the compile step UI. Unedited stock `desktop` /
-    /// `base` profiles short-circuit cargo by reusing the ISO prebuilt
-    /// manifest (still delivered as a worker `Done` event so the screen
-    /// flow is identical, just much faster).
+    /// Always compiles on the installation machine. Stock profiles contain
+    /// hardware-dependent Rust expressions, so an ISO-builder manifest cannot
+    /// safely be reused even when the source hash is unchanged.
     pub(super) fn start_config_compile(&mut self) {
         self.compile_error = None;
         self.compile_notices = Vec::new();
@@ -133,22 +132,11 @@ impl App {
 
         self.compile_task = Some(tokio::task::spawn_blocking(move || {
             let result = match config_path {
-                Some(path) => {
-                    let path = std::path::Path::new(&path);
-                    // Prefer the ISO prebuilt when the stock source is unchanged.
-                    if let Some(prebuilt) = crate::prebuilt::try_prebuilt_manifest(path) {
-                        Ok(oxys::compile::CompileOutcome {
-                            manifest_path: prebuilt,
-                            notices: Vec::new(),
-                        })
-                    } else {
-                        oxys::compile::compile_config_file(
-                            path,
-                            &oxys::compile::oxys_crate_path(),
-                            &out_dir,
-                        )
-                    }
-                }
+                Some(path) => oxys::compile::compile_config_file(
+                    std::path::Path::new(&path),
+                    &oxys::compile::oxys_crate_path(),
+                    &out_dir,
+                ),
                 None => Err(oxys::compile::CompileError::message(
                     "no config file selected",
                 )),
@@ -157,7 +145,7 @@ impl App {
         }));
     }
 
-    /// Apply a successfully produced (or prebuilt) manifest: cache its text,
+    /// Apply a successfully produced manifest: cache its text,
     /// build the package-summary view model, and remember the path for install.
     pub(super) fn accept_compiled_manifest(&mut self, path: PathBuf) {
         match fs::read_to_string(&path) {

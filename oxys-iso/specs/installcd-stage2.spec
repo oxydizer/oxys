@@ -10,7 +10,7 @@
 # boot/kernel/oxys/packages: sys-fs/zfs to build zfs-kmod against it) --
 # i.e. catalyst emerged its OWN kernel and its OWN zfs-kmod, completely
 # independent of oxys-build's. That's exactly the kernel/zfs-kmod
-# version-skew bug oxys-build's build-id/vermagic pairing exists to prevent,
+# version-skew bug oxys-build's metadata/vermagic pairing exists to prevent,
 # recreated one layer up (ISO kernel vs. post-install package-pipeline
 # kernel diverging).
 #
@@ -89,9 +89,11 @@ livecd/fsscript: @REPO_DIR@/fsscript/fsscript.sh
 # networking stack. This is ISO-specific OpenRC wiring; it is separate from
 # whatever services the installed-system manifest enables later.
 # NetworkManager provides `nmtui` on the console for WiFi SSID/password entry.
-livecd/rcadd: hostname|boot dbus|default NetworkManager|default
+# Start ModemManager explicitly so its conf.d ordering and log redirection take
+# effect instead of letting D-Bus activate it with the graphical tty attached.
+livecd/rcadd: hostname|boot dbus|default modemmanager|default NetworkManager|default
 
-# ---- kernel: oxys-build's own tagged kernel + zfs-kmod, injected by
+# ---- kernel: oxys-build's own published kernel + zfs-kmod, injected by
 #      ../catalyst-overrides/kmerge.sh (zero compilation, zero emerge) ----
 boot/kernel: oxys
 
@@ -104,7 +106,7 @@ boot/kernel/oxys/distkernel: yes
 
 # No boot/kernel/oxys/sources or /packages here on purpose -- our
 # kmerge.sh override never emerges anything for this label; the kernel and
-# zfs-kmod are unpacked from oxys-build's own tagged tarballs instead (see
+# zfs-kmod are unpacked from oxys-build's own published tarballs instead (see
 # scripts/resolve-kernel-build.sh and catalyst-overrides/kmerge.sh).
 
 # dracut initramfs args -- still needed and still built here: this is the

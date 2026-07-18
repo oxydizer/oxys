@@ -2,7 +2,7 @@ use std::{fs, io::Write, path::Path, sync::mpsc::Sender, thread, time::Duration}
 
 use crate::{
     exec::{self, ExecError},
-    manifest::{Disk, DiskLayout, SwapConfig, SystemManifest},
+    manifest::{Disk, DiskLayout, ResolvedSwap, SystemManifest},
 };
 
 use super::{SystemInstallError, SystemInstallEvent};
@@ -111,11 +111,12 @@ fn unmount_pseudo(
 
 pub(crate) fn finalize_install(
     manifest: &SystemManifest,
+    resolved_swap: &ResolvedSwap,
     target_mount: &Path,
     sender: &Sender<SystemInstallEvent>,
 ) -> Result<(), SystemInstallError> {
     let mut first_error = None;
-    let parts = DiskPartitionMap::from_disk(&manifest.disk);
+    let parts = DiskPartitionMap::from_disk_with_swap(&manifest.disk, resolved_swap);
     if let Some(swap_part) = &parts.swap {
         let _ = sender.send(SystemInstallEvent::StepOutput {
             line: format!("Disabling swap on {swap_part}"),
@@ -234,12 +235,12 @@ pub(crate) struct DiskPartitionMap {
 }
 
 impl DiskPartitionMap {
-    pub(crate) fn from_disk(disk: &Disk) -> Self {
+    pub(crate) fn from_disk_with_swap(disk: &Disk, resolved_swap: &ResolvedSwap) -> Self {
         if disk.layout == DiskLayout::Zfs {
-            let swap = match disk.partitions.swap {
-                SwapConfig::Partition { .. } => Some(partition_path(&disk.device, 3)),
-                SwapConfig::Zram { .. } | SwapConfig::None | SwapConfig::File { .. } => None,
-            };
+            let swap = resolved_swap
+                .disk
+                .as_ref()
+                .map(|_| partition_path(&disk.device, 3));
             let root_part = if swap.is_some() { 4 } else { 3 };
             return Self {
                 efi: partition_path(&disk.device, 1),
@@ -250,13 +251,13 @@ impl DiskPartitionMap {
         }
 
         let mut next_part = 2;
-        let swap = match disk.partitions.swap {
-            SwapConfig::Partition { .. } => {
+        let swap = match &resolved_swap.disk {
+            Some(_) => {
                 let part = partition_path(&disk.device, next_part);
                 next_part += 1;
                 Some(part)
             }
-            SwapConfig::Zram { .. } | SwapConfig::None | SwapConfig::File { .. } => None,
+            None => None,
         };
         let root = partition_path(&disk.device, next_part);
         let home = if disk.layout == DiskLayout::Ext4 && disk.ext4.separate_home {

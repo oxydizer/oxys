@@ -97,14 +97,16 @@ GRUB). Both default when unset: `init_system = openrc`, `bootloader = grub`.
   ESP by filesystem UUID and boots the same `/EFI/oxys/vmlinuz` copied by the
   shared boot-asset step, so both bootloaders share one kernel layout.
 
-Service state (`services.enabled` / `services.disabled`) is applied offline for
-the resolved init system:
+Service state is applied offline for the resolved init system:
 
 - systemd: `systemctl --root <target> enable/disable <unit>` (unit names include
   the `.service` suffix).
-- OpenRC: runlevel symlinks are managed directly under
-  `<target>/etc/runlevels/default/` (bare service names, e.g. `NetworkManager`),
-  exactly as `rc-update add/del <name> default` would — no chroot required.
+- OpenRC: `services.openrc` explicitly lists the complete `sysinit`, `boot`,
+  `default`, `nonetwork`, and `shutdown` runlevels. The installer reconciles
+  those directories exactly, removing copied live-image links that are absent
+  from the profile and rejecting services without an init script. Session,
+  storage, and swap policy validate their required services instead of adding
+  hidden links. Legacy `enabled`/`disabled` manifests retain additive behavior.
 
 The installer also performs a second, explicit `/boot` copy:
 
@@ -122,7 +124,7 @@ For an ext4 layout, `/etc/fstab` is generated from runtime `blkid` UUIDs:
 UUID=<root-uuid> / ext4 defaults,noatime 0 1
 UUID=<home-uuid> /home ext4 defaults,noatime 0 2
 UUID=<efi-uuid> /boot/efi vfat umask=0077 0 2
-UUID=<swap-uuid> none swap sw 0 0
+UUID=<swap-uuid> none swap sw,pri=10 0 0
 ```
 
 The systemd-boot entry is written to:

@@ -1,11 +1,13 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use oxys::{
     apply_disk_plan, apply_system_install_plan,
     detect::DetectedDisk,
     manifest::{Disk, Password, Timezone, Username, GB},
-    plan_disk, plan_system_install, preflight, release_target_mounts, ProvisionEvent,
+    plan_disk, plan_disk_with_swap, plan_system_install, preflight_with_swap,
+    release_target_mounts, ProvisionEvent,
     SystemInstallEvent, SystemInstallStep,
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -58,10 +60,15 @@ fn step_reports_rsync_progress(step: &SystemInstallStep) -> bool {
         step,
         SystemInstallStep::Command {
             program,
-            description,
             ..
-        } if program == "rsync" && description.contains("live system")
+        } if program == "rsync"
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RsyncProgress {
+    transferred_bytes: u64,
+    percent: u16,
 }
 
 /// Parse the overall completion percent from an rsync `--info=progress2` line.
@@ -69,11 +76,17 @@ fn step_reports_rsync_progress(step: &SystemInstallStep) -> bool {
 /// Typical form: `1,234,567  45%  12.34MB/s  0:00:12` (optionally with xfr#).
 /// Returns `None` for unrelated command output so we never treat an emerge or
 /// mkfs percentage as rsync progress.
-fn parse_rsync_percent(line: &str) -> Option<u16> {
+fn parse_rsync_progress(line: &str) -> Option<RsyncProgress> {
     // progress2 always reports a transfer rate unit ending in B/s (kB/s, MB/s…).
     if !line.contains("B/s") {
         return None;
     }
+    let transferred_bytes = line
+        .split_whitespace()
+        .next()?
+        .replace(',', "")
+        .parse::<u64>()
+        .ok()?;
     let mut best: Option<u16> = None;
     for token in line.split_whitespace() {
         let Some(num) = token.strip_suffix('%') else {
@@ -85,7 +98,47 @@ fn parse_rsync_percent(line: &str) -> Option<u16> {
             }
         }
     }
-    best
+    best.map(|percent| RsyncProgress {
+        transferred_bytes,
+        percent,
+    })
+}
+
+fn format_step_metrics(
+    description: &str,
+    elapsed: Duration,
+    transferred_bytes: Option<u64>,
+) -> String {
+    let seconds = elapsed.as_secs_f64();
+    match transferred_bytes {
+        Some(bytes) => {
+            let bytes_per_second = if seconds > 0.0 {
+                bytes as f64 / seconds
+            } else {
+                0.0
+            };
+            format!(
+                "[metric] {description}: elapsed={seconds:.3}s transferred={bytes} bytes effective_throughput={}",
+                format_rate(bytes_per_second)
+            )
+        }
+        None => format!("[metric] {description}: elapsed={seconds:.3}s"),
+    }
+}
+
+fn format_rate(bytes_per_second: f64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    if bytes_per_second >= GIB {
+        format!("{:.2} GiB/s", bytes_per_second / GIB)
+    } else if bytes_per_second >= MIB {
+        format!("{:.2} MiB/s", bytes_per_second / MIB)
+    } else if bytes_per_second >= KIB {
+        format!("{:.2} KiB/s", bytes_per_second / KIB)
+    } else {
+        format!("{bytes_per_second:.2} B/s")
+    }
 }
 
 /// Map completed weight + in-step fraction into the system-install band
@@ -122,6 +175,10 @@ fn ensure_install_permissions(tx: &UnboundedSender<String>) -> bool {
         }
         None => true,
     }
+}
+
+fn prepare_target_mountpoint(target_mount: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(target_mount)
 }
 
 #[cfg(unix)]
@@ -200,7 +257,10 @@ pub(crate) fn run_install(
             return;
         }
     };
-    manifest.disk = disk;
+    // The selected target is a UI-owned value. Preserve the compiled profile's
+    // filesystem and swap policy instead of replacing the whole Disk object.
+    manifest.disk.device = disk.device;
+    manifest.disk.layout = disk.layout;
     // Resolve the interactively-picked timezone. Planning refuses an
     // unresolved Timezone::Prompt, so when nothing was collected (picker
     // skipped on a broken live image) fall back to leaving the target on the
@@ -256,10 +316,30 @@ pub(crate) fn run_install(
 
     // Clear any leftover mounts from a previous aborted run at our own target
     // mount point, so the preflight guard below doesn't refuse a re-run.
-    release_target_mounts(std::path::Path::new(TARGET_MOUNT));
+    let target_mount = Path::new(TARGET_MOUNT);
+    release_target_mounts(target_mount);
+
+    // System planning happens before destructive disk work so live-image and
+    // hardware-policy failures cannot wipe the selected disk. The planner also
+    // requires its destination to exist, while the disk plan normally creates
+    // this mountpoint later as one of its steps. Prepare the empty directory
+    // now so a clean live boot can pass pre-wipe system-plan validation.
+    if let Err(error) = prepare_target_mountpoint(target_mount) {
+        let _ = tx.send(format!(
+            "[error] failed to prepare target mountpoint {TARGET_MOUNT}: {error}"
+        ));
+        return;
+    }
 
     let _ = tx.send("[run  ] preflight disk".to_string());
-    if let Err(error) = preflight(&manifest.disk) {
+    let resolved_swap = match manifest.resolved_swap() {
+        Ok(swap) => swap,
+        Err(error) => {
+            let _ = tx.send(format!("[error] {error}"));
+            return;
+        }
+    };
+    if let Err(error) = preflight_with_swap(&manifest.disk, &resolved_swap) {
         let _ = tx.send(format!("[error] {error}"));
         return;
     }
@@ -269,7 +349,11 @@ pub(crate) fn run_install(
     // resolves session/graphics and validates the live source image; on
     // machines the image cannot support (e.g. proprietary NVIDIA policy on a
     // nouveau-only ISO) we must fail here so the selected disk is never wiped.
-    let plan = match plan_disk(&manifest.disk, std::path::Path::new(TARGET_MOUNT)) {
+    let plan = match plan_disk_with_swap(
+        &manifest.disk,
+        &resolved_swap,
+        target_mount,
+    ) {
         Ok(plan) => plan,
         Err(error) => {
             let _ = tx.send(format!("[error] {error}"));
@@ -280,7 +364,7 @@ pub(crate) fn run_install(
     let system_plan = match plan_system_install(
         &manifest,
         std::path::Path::new("/"),
-        std::path::Path::new(TARGET_MOUNT),
+        target_mount,
         config_source.as_deref(),
     ) {
         Ok(plan) => {
@@ -299,13 +383,14 @@ pub(crate) fn run_install(
     // Re-check immediately before wipe — covers races after Confirm and any
     // mount activity during the (usually short) planning phase.
     let _ = tx.send("[run  ] re-check disk preflight before wipe".to_string());
-    if let Err(error) = preflight(&manifest.disk) {
+    if let Err(error) = preflight_with_swap(&manifest.disk, &resolved_swap) {
         let _ = tx.send(format!("[error] {error}"));
         return;
     }
 
     let disk_total = plan.steps.len().max(1);
     let mut disk_done = 0usize;
+    let mut disk_step_started: Option<Instant> = None;
     send_progress(&tx, 0);
     let mut stream = apply_disk_plan(&plan);
     for event in &mut stream {
@@ -315,8 +400,24 @@ pub(crate) fn run_install(
             let pct = (disk_done as f32 / disk_total as f32 * DISK_BAND as f32) as u16;
             send_progress(&tx, pct.min(DISK_BAND.saturating_sub(1)));
         }
+        let metric = match &event {
+            ProvisionEvent::StepStart { .. } => {
+                disk_step_started = Some(Instant::now());
+                None
+            }
+            ProvisionEvent::StepComplete { description }
+            | ProvisionEvent::Error {
+                step: description, ..
+            } => disk_step_started
+                .take()
+                .map(|started| format_step_metrics(description, started.elapsed(), None)),
+            ProvisionEvent::StepOutput { .. } => None,
+        };
         let completed = matches!(event, ProvisionEvent::StepComplete { .. });
         let _ = tx.send(format_provision_event(event));
+        if let Some(metric) = metric {
+            let _ = tx.send(metric);
+        }
         if completed {
             disk_done += 1;
             let pct = (disk_done as f32 / disk_total as f32 * DISK_BAND as f32) as u16;
@@ -342,6 +443,8 @@ pub(crate) fn run_install(
     let mut current_weight: u32 = 0;
     let mut current_frac: f32 = 0.0;
     let mut tracks_rsync = false;
+    let mut step_started: Option<Instant> = None;
+    let mut transferred_bytes: Option<u64> = None;
     // Monotonic ceiling so a noisy/out-of-order refresh never rewinds the bar.
     let mut last_pct = DISK_BAND;
 
@@ -359,8 +462,11 @@ pub(crate) fn run_install(
 
     let mut stream = apply_system_install_plan(&system_plan);
     for event in &mut stream {
+        let mut metric = None;
         match &event {
             SystemInstallEvent::StepStart { .. } => {
+                step_started = Some(Instant::now());
+                transferred_bytes = None;
                 current_weight = weights.get(step_idx).copied().unwrap_or(1);
                 current_frac = 0.0;
                 tracks_rsync = system_plan
@@ -377,8 +483,13 @@ pub(crate) fn run_install(
             }
             SystemInstallEvent::StepOutput { line } => {
                 if tracks_rsync {
-                    if let Some(rsync_pct) = parse_rsync_percent(line) {
-                        let frac = (rsync_pct as f32 / 100.0).clamp(0.0, 1.0);
+                    if let Some(progress) = parse_rsync_progress(line) {
+                        transferred_bytes = Some(
+                            transferred_bytes
+                                .unwrap_or_default()
+                                .max(progress.transferred_bytes),
+                        );
+                        let frac = (progress.percent as f32 / 100.0).clamp(0.0, 1.0);
                         // Only push when the transfer actually advanced; progress2
                         // redraws many times at the same percent.
                         if frac > current_frac + 0.001 {
@@ -394,11 +505,15 @@ pub(crate) fn run_install(
                     }
                 }
             }
-            SystemInstallEvent::StepComplete { .. } => {
+            SystemInstallEvent::StepComplete { description } => {
+                metric = step_started.take().map(|started| {
+                    format_step_metrics(description, started.elapsed(), transferred_bytes)
+                });
                 weight_done = weight_done.saturating_add(current_weight);
                 current_weight = 0;
                 current_frac = 0.0;
                 tracks_rsync = false;
+                transferred_bytes = None;
                 step_idx = step_idx.saturating_add(1);
                 emit_system_progress(
                     &tx,
@@ -408,9 +523,17 @@ pub(crate) fn run_install(
                     &mut last_pct,
                 );
             }
-            SystemInstallEvent::Error { .. } => {}
+            SystemInstallEvent::Error { step, .. } => {
+                metric = step_started
+                    .take()
+                    .map(|started| format_step_metrics(step, started.elapsed(), transferred_bytes));
+                transferred_bytes = None;
+            }
         }
         let _ = tx.send(format_system_install_event(event));
+        if let Some(metric) = metric {
+            let _ = tx.send(metric);
+        }
     }
     match stream.wait() {
         Ok(()) => {
@@ -445,26 +568,92 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_rsync_percent_reads_progress2_line() {
+    fn prepare_target_mountpoint_creates_missing_directory() {
+        let temp = std::env::temp_dir().join(format!(
+            "oxys-installer-target-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = temp.join("source");
+        let target = temp.join("target");
+        std::fs::create_dir_all(source.join("boot")).unwrap();
+
+        assert!(!target.exists());
+        prepare_target_mountpoint(&target).unwrap();
+        assert!(target.is_dir());
+        prepare_target_mountpoint(&target).unwrap();
+        plan_system_install(
+            &oxys::manifest::SystemManifest::default(),
+            &source,
+            &target,
+            None,
+        )
+        .expect("prepared target mountpoint should pass system-plan validation");
+
+        std::fs::remove_dir_all(temp).unwrap();
+    }
+
+    #[test]
+    fn installer_profiles_match_iso_overlay() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for profile in ["base.fe2o3", "desktop.fe2o3", "custom.fe2o3"] {
+            let canonical = std::fs::read(manifest_dir.join("configs").join(profile)).unwrap();
+            let overlay = std::fs::read(
+                manifest_dir
+                    .join("../oxys-iso/overlay/root/configs")
+                    .join(profile),
+            )
+            .unwrap();
+            assert_eq!(canonical, overlay, "profile copies differ: {profile}");
+        }
+    }
+
+    #[test]
+    fn parse_rsync_progress_reads_bytes_and_percent() {
         assert_eq!(
-            parse_rsync_percent("  1,234,567  45%  12.34MB/s  0:00:12"),
-            Some(45)
+            parse_rsync_progress("  1,234,567  45%  12.34MB/s  0:00:12"),
+            Some(RsyncProgress {
+                transferred_bytes: 1_234_567,
+                percent: 45,
+            })
         );
         assert_eq!(
-            parse_rsync_percent("987654321  100%  200.00MB/s  0:00:05 (xfr#12, to-chk=0/99)"),
-            Some(100)
+            parse_rsync_progress("987654321  100%  200.00MB/s  0:00:05 (xfr#12, to-chk=0/99)"),
+            Some(RsyncProgress {
+                transferred_bytes: 987_654_321,
+                percent: 100,
+            })
         );
         assert_eq!(
-            parse_rsync_percent("        0   0%    0.00kB/s    0:00:00"),
-            Some(0)
+            parse_rsync_progress("        0   0%    0.00kB/s    0:00:00"),
+            Some(RsyncProgress {
+                transferred_bytes: 0,
+                percent: 0,
+            })
         );
     }
 
     #[test]
-    fn parse_rsync_percent_ignores_unrelated_output() {
-        assert_eq!(parse_rsync_percent("emerging foo-1.2.3"), None);
-        assert_eq!(parse_rsync_percent("using 50% of free space"), None);
-        assert_eq!(parse_rsync_percent("speed 12.34MB/s"), None);
+    fn parse_rsync_progress_ignores_unrelated_output() {
+        assert_eq!(parse_rsync_progress("emerging foo-1.2.3"), None);
+        assert_eq!(parse_rsync_progress("using 50% of free space"), None);
+        assert_eq!(parse_rsync_progress("speed 12.34MB/s"), None);
+    }
+
+    #[test]
+    fn step_metrics_include_effective_transfer_rate() {
+        let rendered = format_step_metrics(
+            "Copy live system into target",
+            Duration::from_secs(2),
+            Some(2 * 1024 * 1024),
+        );
+        assert_eq!(
+            rendered,
+            "[metric] Copy live system into target: elapsed=2.000s transferred=2097152 bytes effective_throughput=1.00 MiB/s"
+        );
     }
 
     #[test]

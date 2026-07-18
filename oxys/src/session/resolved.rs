@@ -69,14 +69,16 @@ impl ResolvedSession {
                 }
             }
         }
-        for service in &self.requirements.services {
-            if !result.services.enabled.contains(service) {
-                result.services.enabled.push(service.clone());
+        if result.init_system == InitSystem::Systemd {
+            for service in &self.requirements.services {
+                if !result.services.enabled.contains(service) {
+                    result.services.enabled.push(service.clone());
+                }
+                result
+                    .services
+                    .disabled
+                    .retain(|disabled| disabled != service);
             }
-            result
-                .services
-                .disabled
-                .retain(|disabled| disabled != service);
         }
         if let Some(index) = self.policy.user_index {
             for group in &self.requirements.user_groups {

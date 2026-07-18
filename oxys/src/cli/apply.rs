@@ -2,7 +2,7 @@ use std::path::Path;
 
 use colored::Colorize;
 use oxys::{
-    SystemManifest,
+    InitSystem, ResolvedSwap, SystemManifest, activate_openrc_services,
     diff::{PackageChange, diff_packages},
     runtime::sync_runtime_config,
     use_resolver::{apply_portage_plan, emerge_depclean_pretend, emerge_deselect, emerge_select},
@@ -40,8 +40,15 @@ pub(crate) fn apply_manifest(desired: SystemManifest) -> Result<()> {
     println!("{}", "Resolved graphics policy".cyan().bold());
     println!("{}", resolved_graphics.render());
     let effective_desired = resolved_graphics.materialize_manifest(&desired);
+    let resolved_swap = effective_desired.resolved_swap()?;
+    let effective_desired = resolved_swap.materialize_manifest(&effective_desired);
     let system_manifest_path = effective_system_manifest_path();
     let current = load_manifest_optional(&system_manifest_path)?;
+    let current_swap = current
+        .as_ref()
+        .map(SystemManifest::resolved_swap)
+        .transpose()?;
+    let swap_reboot_required = validate_swap_transition(current_swap.as_ref(), &resolved_swap)?;
 
     println!("{}", "Applying manifest to running system".cyan().bold());
     let current_packages = current
@@ -70,6 +77,20 @@ pub(crate) fn apply_manifest(desired: SystemManifest) -> Result<()> {
     reconcile_world(&changes, &root);
 
     let runtime = sync_runtime_config(&effective_desired, &root)?;
+    if effective_desired.init_system == InitSystem::Openrc
+        && effective_desired
+            .services
+            .openrc
+            .runlevels()
+            .any(|(_, services)| !services.is_empty())
+    {
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        activate_openrc_services(&effective_desired, &root, &sender)?;
+        println!(
+            "{}",
+            "Reconciled authoritative OpenRC runlevels".green().bold()
+        );
+    }
     if runtime.prime_offload_configured {
         println!(
             "{}",
@@ -85,9 +106,41 @@ pub(crate) fn apply_manifest(desired: SystemManifest) -> Result<()> {
                 .bold()
         );
     }
+    if swap_reboot_required {
+        println!(
+            "{}",
+            "Swap configuration changed; reboot to reconcile the zram device safely"
+                .yellow()
+                .bold()
+        );
+    }
     persist_manifest_value(&effective_desired, &system_manifest_path)?;
     println!("{}", "Apply completed successfully".green().bold());
     Ok(())
+}
+
+fn validate_swap_transition(
+    current: Option<&ResolvedSwap>,
+    desired: &ResolvedSwap,
+) -> std::io::Result<bool> {
+    let Some(current) = current else {
+        if desired.disk.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "disk-backed swap requires an existing Oxys manifest proving the partition layout; use oxys install system to repartition",
+            ));
+        }
+        return Ok(desired.zram.is_some());
+    };
+
+    if current.disk != desired.disk {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "changing disk-backed swap requires repartitioning and is not supported by oxys apply",
+        ));
+    }
+
+    Ok(current.zram != desired.zram)
 }
 
 /// Brings the Portage world set in line with the manifest and surfaces (without running)
@@ -130,5 +183,44 @@ fn print_world_result(result: std::result::Result<String, oxys::use_resolver::Us
     match result {
         Ok(output) => print!("{output}"),
         Err(err) => println!("{} {err}", "warning:".yellow().bold()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use oxys::{Compression, GB, ResolvedDiskSwap, ResolvedZram};
+
+    fn resolved_swap(zram: bool, disk: bool) -> ResolvedSwap {
+        ResolvedSwap {
+            zram: zram.then_some(ResolvedZram {
+                size: 4 * GB,
+                algorithm: Compression::Zstd,
+                priority: 100,
+            }),
+            disk: disk.then_some(ResolvedDiskSwap {
+                size: 4 * GB,
+                priority: 10,
+            }),
+            swappiness: 180,
+        }
+    }
+
+    #[test]
+    fn apply_rejects_disk_swap_without_a_trusted_current_layout() {
+        let desired = resolved_swap(false, true);
+        let error = validate_swap_transition(None, &desired).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("existing Oxys manifest"));
+    }
+
+    #[test]
+    fn apply_requires_reboot_for_any_zram_transition() {
+        let disabled = resolved_swap(false, false);
+        let zram = resolved_swap(true, false);
+
+        assert!(validate_swap_transition(Some(&disabled), &zram).unwrap());
+        assert!(validate_swap_transition(Some(&zram), &disabled).unwrap());
+        assert!(!validate_swap_transition(Some(&zram), &zram).unwrap());
     }
 }

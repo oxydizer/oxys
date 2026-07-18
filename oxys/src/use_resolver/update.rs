@@ -5,7 +5,7 @@ use std::{
 
 use crate::manifest::{Package, SystemManifest};
 
-use super::{plan_portage, PortagePlan, UseResolverError};
+use super::{PortagePlan, UseResolverError, plan_portage};
 
 /// A package operation parsed from `emerge -uDNp --columns @world`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -303,8 +303,8 @@ fn strip_slot_and_repo(token: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_world_update_plan, manifest_for_update_preflight, parse_pretend_world_update,
-        PretendOperation, PretendPackageSource, WorldUpdateWarning,
+        PretendOperation, PretendPackageSource, WorldUpdateWarning, build_world_update_plan,
+        manifest_for_update_preflight, parse_pretend_world_update,
     };
     use crate::manifest::{Package, SystemManifest};
 
@@ -369,9 +369,10 @@ These are the packages that would be merged, in order:
         )
         .unwrap_err();
 
-        assert!(err
-            .message
-            .contains("blocker rows require manual resolution"));
+        assert!(
+            err.message
+                .contains("blocker rows require manual resolution")
+        );
     }
 
     #[test]
@@ -421,10 +422,12 @@ These are the packages that would be merged, in order:
         assert_eq!(gcc.version.as_deref(), Some("15.1.1"));
         assert!(gcc.from_source);
         assert!(!gcc.binary);
-        assert!(manifest
-            .packages
-            .iter()
-            .any(|package| package.package == "app-misc/binconsumer" && package.binary));
+        assert!(
+            manifest
+                .packages
+                .iter()
+                .any(|package| package.package == "app-misc/binconsumer" && package.binary)
+        );
     }
 
     #[test]

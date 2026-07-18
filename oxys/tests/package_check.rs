@@ -6,7 +6,7 @@ mod support;
 use support::fixture_repo::FixtureRepo;
 
 use oxys::manifest::{Package, SystemManifest};
-use oxys::package_check::{check_packages, suggestion_note_for, PackageCheckOutcome, PackageIndex};
+use oxys::package_check::{PackageCheckOutcome, PackageIndex, check_packages, suggestion_note_for};
 
 fn manifest_with(atoms: &[&str]) -> SystemManifest {
     SystemManifest {

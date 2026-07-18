@@ -7,7 +7,7 @@ use std::{
 use chrono::{DateTime, Utc};
 
 use super::{
-    parse::parse_md5_cache_metadata, util::sibling_temp_path, PackageMetadata, UseResolverError,
+    PackageMetadata, UseResolverError, parse::parse_md5_cache_metadata, util::sibling_temp_path,
 };
 
 const CACHE_TTL_DAYS: i64 = 7;

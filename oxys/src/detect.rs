@@ -77,6 +77,13 @@ pub fn detect_ram() -> Option<u64> {
     kb.checked_mul(1024)
 }
 
+/// Installed RAM rounded to the nearest GiB for policy thresholds.
+/// Falls back to 8 GiB when `/proc/meminfo` cannot be read.
+pub fn system_ram_gib() -> u64 {
+    let bytes = detect_ram().unwrap_or(8 * GB);
+    bytes.saturating_add(GB / 2).div_euclid(GB).max(1)
+}
+
 /// Returns the recommended swap config.
 /// Defaults to Zram sized at half of detected RAM.
 /// Falls back to Zram { size: 4GB } if RAM detection fails.

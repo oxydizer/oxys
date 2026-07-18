@@ -8,7 +8,9 @@ use thiserror::Error;
 use crate::exec::{ExecError, StepEvent, StepStream};
 use crate::graphics::{GraphicsResolveError, ResolvedGraphics};
 use crate::kernel_cmdline::{KernelCmdlineResolveError, ResolvedKernelCmdline};
-use crate::manifest::{Bootloader, Disk, DiskLayout, InitSystem, SystemManifest, User};
+use crate::manifest::{
+    Bootloader, Disk, DiskLayout, InitSystem, ResolvedSwap, SwapResolveError, SystemManifest, User,
+};
 use crate::runtime::RuntimeConfigError;
 use crate::session::{ResolvedSession, SessionResolveError};
 use crate::use_resolver::UseResolverError;
@@ -25,6 +27,7 @@ pub struct SystemInstallPlan {
     pub resolved_session: ResolvedSession,
     pub resolved_graphics: ResolvedGraphics,
     pub resolved_kernel_cmdline: ResolvedKernelCmdline,
+    pub resolved_swap: ResolvedSwap,
 }
 
 impl SystemInstallPlan {
@@ -73,6 +76,12 @@ pub enum SystemInstallStep {
     GenerateFstab {
         description: String,
         disk: Disk,
+        resolved_swap: ResolvedSwap,
+        target_mount: PathBuf,
+    },
+    ConfigureSwap {
+        description: String,
+        resolved_swap: ResolvedSwap,
         target_mount: PathBuf,
     },
     ResetMachineId {
@@ -165,6 +174,7 @@ pub enum SystemInstallStep {
     Finalize {
         description: String,
         manifest: SystemManifest,
+        resolved_swap: ResolvedSwap,
         target_mount: PathBuf,
     },
 }
@@ -189,6 +199,7 @@ impl SystemInstallStep {
             | Self::ResolveKernelCmdline { description, .. }
             | Self::Command { description, .. }
             | Self::GenerateFstab { description, .. }
+            | Self::ConfigureSwap { description, .. }
             | Self::ResetMachineId { description, .. }
             | Self::ConfigureHostname { description, .. }
             | Self::ConfigureTimezone { description, .. }
@@ -221,6 +232,17 @@ impl SystemInstallStep {
                     target_mount.join("etc/fstab").display()
                 )
             }
+            Self::ConfigureSwap {
+                resolved_swap,
+                target_mount,
+                ..
+            } => format!(
+                "write swap policy under {} (zram: {}, disk: {}, swappiness: {})",
+                target_mount.join("etc").display(),
+                resolved_swap.zram.is_some(),
+                resolved_swap.disk.is_some(),
+                resolved_swap.swappiness
+            ),
             Self::ResetMachineId { target_mount, .. } => {
                 format!("truncate {}", target_mount.join("etc/machine-id").display())
             }
@@ -290,9 +312,10 @@ impl SystemInstallStep {
                 format!("apply systemd service state ({enabled} enable, {disabled} disable)")
             }
             Self::ActivateOpenrcServices { manifest, .. } => {
-                let enabled = services::openrc_enabled_services(manifest).len();
-                let disabled = manifest.services.disabled.len();
-                format!("apply openrc service state ({enabled} enable, {disabled} disable)")
+                let enabled = services::openrc_enabled_service_count(manifest);
+                format!(
+                    "apply openrc service state: reconcile authoritative runlevels ({enabled} enabled)"
+                )
             }
             Self::BindMountPseudo { target_mount, .. } => {
                 format!(
@@ -409,6 +432,8 @@ pub enum SystemInstallError {
     KernelCmdline(#[from] KernelCmdlineResolveError),
     #[error(transparent)]
     Runtime(#[from] RuntimeConfigError),
+    #[error(transparent)]
+    Swap(#[from] SwapResolveError),
 }
 
 mod planner;

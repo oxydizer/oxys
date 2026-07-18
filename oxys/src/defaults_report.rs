@@ -6,7 +6,9 @@
 //! config": a config that spells out the default value reads as default here,
 //! which is fine — the point is showing the effective value.
 
-use crate::manifest::{Bootloader, LoginFrontend, SwapConfig, SystemManifest, GB, MB};
+use crate::manifest::{
+    Bootloader, GB, LoginFrontend, MB, SwapConfig, SwapSize, SwapStrategy, SystemManifest,
+};
 
 /// One manifest setting whose effective value equals the built-in default.
 #[derive(Debug, PartialEq, Eq)]
@@ -133,9 +135,13 @@ pub fn defaulted_settings(manifest: &SystemManifest) -> Vec<DefaultedSetting> {
         lowercase_debug(&manifest.disk.layout),
     );
     note(
-        "disk.partitions.swap",
-        manifest.disk.partitions.swap == baseline.disk.partitions.swap,
-        render_swap(&manifest.disk.partitions.swap),
+        "swap",
+        manifest.disk.partitions.swap.is_unspecified() && manifest.swap == baseline.swap,
+        if manifest.disk.partitions.swap.is_unspecified() {
+            render_swap(&manifest.swap.strategy)
+        } else {
+            render_legacy_swap(&manifest.disk.partitions.swap)
+        },
     );
 
     report
@@ -163,12 +169,43 @@ fn render_login(login: &LoginFrontend) -> String {
     }
 }
 
-fn render_swap(swap: &SwapConfig) -> String {
+fn render_legacy_swap(swap: &SwapConfig) -> String {
     match swap {
+        SwapConfig::Unspecified => "top-level policy".to_owned(),
         SwapConfig::Partition { size } => format!("partition ({})", human_size(*size)),
         SwapConfig::File { size } => format!("file ({})", human_size(*size)),
         SwapConfig::Zram { size } => format!("zram ({})", human_size(*size)),
         SwapConfig::None => "none".to_owned(),
+    }
+}
+
+fn render_swap(strategy: &SwapStrategy) -> String {
+    match strategy {
+        SwapStrategy::Disk { size } => format!("disk ({})", render_swap_size(size)),
+        SwapStrategy::Hybrid { zram, disk } => format!(
+            "hybrid (zram {}/{}, {}, disk {})",
+            zram.fraction.numerator,
+            zram.fraction.denominator,
+            zram.algorithm.kernel_name(),
+            render_swap_size(&disk.size)
+        ),
+        SwapStrategy::ZramOnly {
+            algorithm,
+            fraction,
+        } => format!(
+            "zram-only ({}/{}, {})",
+            fraction.numerator,
+            fraction.denominator,
+            algorithm.kernel_name()
+        ),
+        SwapStrategy::Disabled => "disabled".to_owned(),
+    }
+}
+
+fn render_swap_size(size: &SwapSize) -> String {
+    match size {
+        SwapSize::MatchRam => "match RAM".to_owned(),
+        SwapSize::Fixed(bytes) => human_size(*bytes),
     }
 }
 
@@ -211,7 +248,7 @@ mod tests {
             "session.login",
             "session.compositor",
             "disk.layout",
-            "disk.partitions.swap",
+            "swap",
         ] {
             assert!(paths.contains(&expected), "missing {expected} in {paths:?}");
         }
@@ -252,8 +289,10 @@ mod tests {
     fn report_lines_carry_value_and_marker() {
         let report = defaulted_settings(&SystemManifest::default());
         let lines = render_defaults_report(&report);
-        assert!(lines
-            .iter()
-            .any(|line| line == "compiler.ldflags = \"-fuse-ld=mold\" (default)"));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "compiler.ldflags = \"-fuse-ld=mold\" (default)")
+        );
     }
 }

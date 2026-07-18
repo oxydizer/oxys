@@ -44,7 +44,9 @@ fn unknown_timezone_is_rejected_before_planning() {
 
     let error = plan_system_install(&manifest, &source, &target, None).unwrap_err();
     assert!(
-        error.to_string().contains("unknown timezone \"Europe/Lodnon\""),
+        error
+            .to_string()
+            .contains("unknown timezone \"Europe/Lodnon\""),
         "got: {error}"
     );
 }
@@ -213,6 +215,10 @@ fn package_emerge_step_is_omitted_without_manifest_packages() {
             layout: DiskLayout::Ext4,
             ..Disk::default()
         },
+        swap: crate::manifest::Swap {
+            strategy: crate::manifest::SwapStrategy::Disabled,
+            swappiness: 180,
+        },
         ..SystemManifest::default()
     };
 
@@ -223,6 +229,51 @@ fn package_emerge_step_is_omitted_without_manifest_packages() {
             .iter()
             .any(|step| matches!(step, SystemInstallStep::EmergePackages { .. }))
     );
+}
+
+#[test]
+fn swap_policy_is_resolved_and_configured_before_service_activation() {
+    let temp = TempTree::new("swap-plan");
+    let source = temp.path().join("source");
+    let target = temp.path().join("target");
+    fs::create_dir_all(source.join("boot")).unwrap();
+    fs::create_dir_all(&target).unwrap();
+    let manifest = SystemManifest {
+        disk: Disk {
+            device: "/dev/vda".to_owned(),
+            ..Disk::default()
+        },
+        swap: crate::manifest::Swap {
+            strategy: crate::manifest::SwapStrategy::Hybrid {
+                zram: crate::manifest::ZramOptions::default(),
+                disk: crate::manifest::SwapDiskOptions {
+                    size: crate::manifest::SwapSize::Fixed(4 * GB),
+                },
+            },
+            swappiness: 180,
+        },
+        services: crate::manifest::Services {
+            enabled: vec!["sshd".to_owned()],
+            disabled: Vec::new(),
+            ..Default::default()
+        },
+        ..SystemManifest::default()
+    };
+
+    let plan = plan_system_install(&manifest, &source, &target, None).unwrap();
+    assert_eq!(plan.resolved_swap.zram.as_ref().unwrap().priority, 100);
+    assert_eq!(plan.resolved_swap.disk.as_ref().unwrap().priority, 10);
+    let swap_idx = plan
+        .steps
+        .iter()
+        .position(|step| matches!(step, SystemInstallStep::ConfigureSwap { .. }))
+        .unwrap();
+    let service_idx = plan
+        .steps
+        .iter()
+        .position(|step| matches!(step, SystemInstallStep::ActivateOpenrcServices { .. }))
+        .unwrap();
+    assert!(swap_idx < service_idx);
 }
 
 #[test]

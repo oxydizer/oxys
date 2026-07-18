@@ -4,10 +4,48 @@ use super::{Password, Shell, Username};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Services {
+    /// Complete OpenRC runlevel state. For OpenRC, these lists are
+    /// authoritative: entries copied from the live image but absent here are
+    /// removed during installation.
+    #[serde(default)]
+    pub openrc: OpenrcServices,
+    /// systemd service policy (retained until systemd gets the same model).
     #[serde(default)]
     pub enabled: Vec<String>,
     #[serde(default)]
     pub disabled: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct OpenrcServices {
+    #[serde(default)]
+    pub sysinit: Vec<String>,
+    #[serde(default)]
+    pub boot: Vec<String>,
+    #[serde(default)]
+    pub default: Vec<String>,
+    #[serde(default)]
+    pub nonetwork: Vec<String>,
+    #[serde(default)]
+    pub shutdown: Vec<String>,
+}
+
+impl OpenrcServices {
+    pub fn contains(&self, service: &str) -> bool {
+        self.runlevels()
+            .any(|(_, services)| services.iter().any(|candidate| candidate == service))
+    }
+
+    pub fn runlevels(&self) -> impl Iterator<Item = (&'static str, &[String])> {
+        [
+            ("sysinit", self.sysinit.as_slice()),
+            ("boot", self.boot.as_slice()),
+            ("default", self.default.as_slice()),
+            ("nonetwork", self.nonetwork.as_slice()),
+            ("shutdown", self.shutdown.as_slice()),
+        ]
+        .into_iter()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

@@ -1,7 +1,13 @@
 use std::{error::Error, path::Path};
 
-pub(crate) fn build(root: &Path, atom: &str, output: &Path) -> Result<(), Box<dyn Error>> {
-    let metadata = oxys::packages::build(root, atom, output)?;
+pub(crate) fn build(root: &Path, atom: &str, output: Option<&Path>) -> Result<(), Box<dyn Error>> {
+    let (metadata, output) = match output {
+        Some(output) => (
+            oxys::packages::build(root, atom, output)?,
+            output.to_owned(),
+        ),
+        None => oxys::packages::build_named(root, atom, Path::new("."))?,
+    };
     println!(
         "Built {} for {} as {}",
         output.display(),

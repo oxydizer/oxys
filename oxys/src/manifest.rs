@@ -5,8 +5,9 @@ mod compiler;
 mod disk;
 mod packages;
 mod settings;
+mod swap;
 
-pub use accounts::{Services, User};
+pub use accounts::{OpenrcServices, Services, User};
 pub use compiler::{BuildOptimisation, Compiler, March};
 pub use disk::{
     Disk, DiskPartitions, EfiPartition, Ext4Options, Subvolume, SwapConfig, ZfsCanmount,
@@ -21,9 +22,16 @@ pub use settings::{
     SessionMode, SessionTracker, SessionUser, Shell, SoftwareRenderer, Timezone, Username,
     VideoCard, VideoCards, VmGraphics,
 };
+pub use swap::{
+    Compression, DEFAULT_SWAPPINESS, DISK_SWAP_PRIORITY, RamFraction, ResolvedDiskSwap,
+    ResolvedSwap, ResolvedZram, Swap, SwapDiskOptions, SwapResolveError, SwapSize, SwapStrategy,
+    ZRAM_SWAP_PRIORITY, ZramOptions, resolve_swap_for_ram,
+};
 
 pub const MB: u64 = 1024 * 1024;
 pub const GB: u64 = 1024 * MB;
+pub const MIB: u64 = MB;
+pub const GIB: u64 = GB;
 
 /// User-facing declarative system definition.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
@@ -32,6 +40,8 @@ pub struct SystemManifest {
     pub os: Os,
     #[serde(default)]
     pub disk: Disk,
+    #[serde(default)]
+    pub swap: Swap,
     #[serde(default)]
     pub hardware: Hardware,
     #[serde(default)]
@@ -196,6 +206,8 @@ impl<'de> Deserialize<'de> for SystemManifest {
             #[serde(default)]
             disk: Disk,
             #[serde(default)]
+            swap: Swap,
+            #[serde(default)]
             hardware: HardwareCompat,
             #[serde(default)]
             kernel: Kernel,
@@ -230,6 +242,7 @@ impl<'de> Deserialize<'de> for SystemManifest {
         Ok(Self {
             os: value.os,
             disk: value.disk,
+            swap: value.swap,
             hardware,
             kernel: value.kernel,
             journal: value.journal,

@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::detect::default_swap;
-
 use super::{DiskLayout, Encryption, GB, MB};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -135,6 +133,8 @@ impl Default for EfiPartition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SwapConfig {
+    /// Compatibility sentinel: use the manifest's top-level `swap` policy.
+    Unspecified,
     /// Dedicated swap partition of given size in bytes
     Partition { size: u64 },
     /// Swapfile of given size in bytes.
@@ -149,7 +149,7 @@ pub enum SwapConfig {
 
 impl Default for SwapConfig {
     fn default() -> Self {
-        default_swap()
+        Self::Unspecified
     }
 }
 
@@ -157,15 +157,21 @@ impl Default for SwapConfig {
 pub struct DiskPartitions {
     #[serde(default)]
     pub efi: EfiPartition,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "SwapConfig::is_unspecified")]
     pub swap: SwapConfig,
+}
+
+impl SwapConfig {
+    pub fn is_unspecified(&self) -> bool {
+        matches!(self, Self::Unspecified)
+    }
 }
 
 impl Default for DiskPartitions {
     fn default() -> Self {
         Self {
             efi: EfiPartition::default(),
-            swap: default_swap(),
+            swap: SwapConfig::Unspecified,
         }
     }
 }

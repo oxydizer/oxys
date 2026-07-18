@@ -18,7 +18,7 @@ so a protected-looking config cannot accidentally install plaintext.
 ZFS is the primary layout. It creates:
 
 - EFI system partition mounted at `/boot/efi`
-- optional swap partition, only when `SwapConfig::Partition` is configured
+- optional swap partition when the resolved top-level swap policy uses disk
 - one ZFS data partition
 - one unencrypted ZFS pool, default `rpool`
 - datasets derived from `disk.subvolumes`
@@ -80,7 +80,7 @@ Disk {
 The ext4 layout creates:
 
 - EFI system partition mounted at `/boot/efi`
-- optional swap partition, only when `SwapConfig::Partition` is configured
+- optional swap partition when the resolved top-level swap policy uses disk
 - ext4 root partition
 - ext4 `/home` partition using the remaining disk space by default
 
@@ -130,24 +130,18 @@ Disk {
             size: 1024 * MB,
             mount: "/boot/efi".into(),
         },
-        swap: SwapConfig::Partition { size: 16 * GB },
+        swap: SwapConfig::Partition { size: 16 * GB }, // legacy compatibility
     },
     ..Disk::default()
 }
 ```
 
-The default swap policy is zram, which does not create a disk partition. To
-avoid any swap setup in the disk plan:
+New configs declare swap at the top level. To avoid any swap setup:
 
 ```rust
-Disk {
-    device: "/dev/nvme0n1".into(),
-    layout: DiskLayout::Zfs,
-    partitions: DiskPartitions {
-        swap: SwapConfig::None,
-        ..DiskPartitions::default()
-    },
-    ..Disk::default()
+Swap {
+    strategy: SwapStrategy::Disabled,
+    swappiness: 180,
 }
 ```
 

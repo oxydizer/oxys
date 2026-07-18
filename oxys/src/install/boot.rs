@@ -11,8 +11,8 @@ use crate::{
 };
 
 use super::{
-    blkid_value, run_chroot, write_file, zfs_dataset_name, DiskPartitionMap, SystemInstallError,
-    SystemInstallEvent,
+    DiskPartitionMap, SystemInstallError, SystemInstallEvent, blkid_value, run_chroot, write_file,
+    zfs_dataset_name,
 };
 
 fn get_grub_relative_path(
@@ -193,7 +193,8 @@ pub(super) fn write_grub_config(
     // location as the systemd-boot entry. `search` re-roots at the ESP by its
     // filesystem UUID before loading the kernel.
     let esp_root = target_mount.join(manifest.disk.partitions.efi.mount.trim_start_matches('/'));
-    let parts = DiskPartitionMap::from_disk(&manifest.disk);
+    let resolved_swap = manifest.resolved_swap()?;
+    let parts = DiskPartitionMap::from_disk_with_swap(&manifest.disk, &resolved_swap);
     let esp_uuid = blkid_value(&parts.efi, "UUID")?;
     let options = boot_options(manifest, resolved_kernel_cmdline)?;
 
@@ -283,7 +284,8 @@ fn boot_options(
     let mut options = Vec::new();
     match manifest.disk.layout {
         DiskLayout::Ext4 => {
-            let parts = DiskPartitionMap::from_disk(&manifest.disk);
+            let resolved_swap = manifest.resolved_swap()?;
+            let parts = DiskPartitionMap::from_disk_with_swap(&manifest.disk, &resolved_swap);
             let root_uuid = blkid_value(&parts.root, "UUID")?;
             options.push(format!("root=UUID={root_uuid}"));
             options.push("rw".to_owned());

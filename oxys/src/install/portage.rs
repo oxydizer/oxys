@@ -3,7 +3,7 @@ use std::{fs, path::Path, sync::mpsc::Sender};
 use crate::{
     exec,
     manifest::SystemManifest,
-    use_resolver::{plan_portage, run_emerge_chroot, write_portage_plan_config, EmergeLine},
+    use_resolver::{EmergeLine, plan_portage, run_emerge_chroot, write_portage_plan_config},
 };
 
 use super::{SystemInstallError, SystemInstallEvent};

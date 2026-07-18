@@ -3,8 +3,8 @@ use std::{collections::HashMap, fs, path::Path};
 use super::{generate_make_conf, gpu_to_video_cards, should_enable_pgo, write_portage_config};
 use crate::{
     manifest::{
-        BuildOptimisation, Compiler, Gpu, GpuVendor, Graphics, Hardware, March, MesaGraphics, Oxys,
-        Package, SystemManifest, VideoCard, VideoCards,
+        BuildOptimisation, Compiler, Gpu, GpuVendor, Graphics, Hardware, InitSystem, March,
+        MesaGraphics, Oxys, Package, SystemManifest, VideoCard, VideoCards,
     },
     use_resolver::{Conflict, PortagePlan, UseResolution, Warning},
 };
@@ -264,6 +264,7 @@ fn march_is_appended_to_c_and_cxx_flags() {
 
 #[test]
 fn configured_binhost_is_emitted_in_make_conf() {
+    let jobs = Compiler::default().emerge_jobs;
     let output = generate_make_conf(
         &SystemManifest {
             compiler: Compiler {
@@ -278,11 +279,14 @@ fn configured_binhost_is_emitted_in_make_conf() {
     );
 
     assert!(output.make_conf.contains(
-            "PORTAGE_BINHOST=\"https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64-v3/\""
-        ));
+        "PORTAGE_BINHOST=\"https://packages.oxysos.org/x86-64-v3/ https://kernel.oxysos.org/x86-64-v3/\""
+    ));
     assert!(output.make_conf.contains("FEATURES=\"ccache getbinpkg\""));
+    assert!(output.make_conf.contains(&format!(
+        "EMERGE_DEFAULT_OPTS=\"--jobs={jobs} --load-average={jobs} --binpkg-respect-use=y\""
+    )));
     assert!(output.make_conf.contains(
-            "USE=\"-elogind X alsa dbus fontconfig gtk harfbuzz jpeg opengl pipewire png policykit pulseaudio ssl svg systemd threads udev unicode vulkan wayland webp\""
+            "USE=\"-systemd X alsa dbus elogind fontconfig gtk harfbuzz jpeg opengl pipewire png policykit pulseaudio ssl svg threads udev unicode vulkan wayland webp\""
         ));
     assert!(
         output
@@ -291,6 +295,26 @@ fn configured_binhost_is_emitted_in_make_conf() {
     );
     assert!(output.make_conf.contains("INPUT_DEVICES=\"libinput\""));
     assert!(output.make_conf.contains("LLVM_TARGETS=\"AMDGPU X86\""));
+}
+
+#[test]
+fn systemd_binhost_baseline_uses_systemd_without_elogind() {
+    let output = generate_make_conf(
+        &SystemManifest {
+            init_system: InitSystem::Systemd,
+            compiler: Compiler {
+                binhost: March::X86_64V3.binhost_url(),
+                ..Compiler::default()
+            },
+            ..SystemManifest::default()
+        },
+        &["-systemd".to_owned(), "elogind".to_owned()],
+        &[],
+    );
+
+    assert!(output.make_conf.contains(
+            "USE=\"-elogind X alsa dbus fontconfig gtk harfbuzz jpeg opengl pipewire png policykit pulseaudio ssl svg systemd threads udev unicode vulkan wayland webp\""
+        ));
 }
 
 #[test]
@@ -342,6 +366,7 @@ fn no_binhost_configured_omits_portage_binhost() {
 
     assert!(!output.make_conf.contains("PORTAGE_BINHOST"));
     assert!(!output.make_conf.contains("getbinpkg"));
+    assert!(output.make_conf.contains("--binpkg-respect-use=y"));
     assert!(!output.make_conf.contains("INPUT_DEVICES="));
     assert!(!output.make_conf.contains("LLVM_TARGETS="));
 }

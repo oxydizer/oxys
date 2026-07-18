@@ -11,11 +11,12 @@ mod services;
 mod users;
 
 pub use exec::apply_system_install_plan;
+pub(super) use host::{DiskPartitionMap, blkid_value, run_chroot, write_file, zfs_dataset_name};
 pub use plan::{
-    plan_system_install, SystemInstallError, SystemInstallEvent, SystemInstallPlan,
-    SystemInstallStep, SystemInstallStream,
+    SystemInstallError, SystemInstallEvent, SystemInstallPlan, SystemInstallStep,
+    SystemInstallStream, plan_system_install,
 };
-pub(super) use host::{blkid_value, run_chroot, write_file, zfs_dataset_name, DiskPartitionMap};
+pub use services::activate_openrc_services;
 
 /// The graphical autologin only makes sense when a Wayland compositor is
 /// actually installed. Key off niri specifically, since that is what the

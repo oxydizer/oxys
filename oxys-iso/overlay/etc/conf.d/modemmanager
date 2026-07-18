@@ -1,0 +1,9 @@
+# OxysOS: keep ModemManager diagnostics out of the graphical login console.
+#
+# NetworkManager talks to ModemManager over D-Bus.  Starting ModemManager as
+# an OpenRC service before NetworkManager prevents D-Bus activation from
+# inheriting the console, while these OpenRC redirections retain its output
+# for diagnosis without corrupting full-screen applications on tty1.
+rc_before="NetworkManager"
+output_log="/var/log/modemmanager.log"
+error_log="/var/log/modemmanager.log"

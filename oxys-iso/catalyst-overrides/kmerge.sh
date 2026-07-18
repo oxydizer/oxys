@@ -15,7 +15,7 @@
 # vermagic-verified (see
 # ../../oxys-build/podman/scripts/oxys-build-packages.sh), not a second,
 # independently-(re)built kernel -- that's precisely the kernel/zfs-kmod
-# version-skew bug the build-id pairing work exists to prevent, one layer up
+# version-skew bug the artifact pairing checks exist to prevent, one layer up
 # (ISO kernel vs. post-install package-pipeline kernel silently diverging).
 #
 # This script replaces catalyst's kmerge.sh entirely (installed over it by

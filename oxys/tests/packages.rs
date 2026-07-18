@@ -11,6 +11,37 @@ const CATEGORY: &str = "gui-apps";
 const PF: &str = "wl-clipboard-2.2.1";
 
 #[test]
+fn canonical_filename_includes_architecture_and_microarchitecture() {
+    let reference = fixture_reference_root();
+    fs::write(
+        reference
+            .path()
+            .join(format!("var/db/pkg/{CATEGORY}/{PF}/CFLAGS")),
+        "-O2 -pipe -march=x86-64-v3\n",
+    )
+    .unwrap();
+    fs::write(
+        reference
+            .path()
+            .join(format!("var/db/pkg/{CATEGORY}/{PF}/BUILD_ID")),
+        "2\n",
+    )
+    .unwrap();
+    let output_dir = TempDir::new().unwrap();
+
+    let (metadata, artifact) =
+        oxys::packages::build_named(reference.path(), "gui-apps/wl-clipboard", output_dir.path())
+            .unwrap();
+
+    assert_eq!(
+        artifact.file_name().unwrap(),
+        "wl-clipboard-2.2.1-r2-x86_64-v3.oxys"
+    );
+    assert!(artifact.is_file());
+    assert_eq!(oxys::packages::verify(&artifact).unwrap(), metadata);
+}
+
+#[test]
 fn artifact_round_trip_is_verified_idempotent_and_removable() {
     let reference = fixture_reference_root();
     let output_dir = TempDir::new().unwrap();

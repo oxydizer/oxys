@@ -50,6 +50,47 @@ pub fn plan_system_install(
         crate::kernel_cmdline::resolve_kernel_cmdline_with_graphics(&manifest, &resolved_graphics)?;
     let resolved_graphics = resolved_graphics.validate_source(source_root)?;
     let manifest = resolved_graphics.materialize_manifest(&manifest);
+    let resolved_swap = manifest.resolved_swap()?;
+    if resolved_swap.zram.is_some() && manifest.init_system != InitSystem::Openrc {
+        return Err(SystemInstallError::InvalidPlan(
+            "zram swap provisioning currently supports OpenRC through sys-block/zram-init"
+                .to_owned(),
+        ));
+    }
+    let authoritative_openrc = manifest
+        .services
+        .openrc
+        .runlevels()
+        .any(|(_, services)| !services.is_empty());
+    if authoritative_openrc
+        && resolved_swap.zram.is_some()
+        && !manifest
+            .services
+            .openrc
+            .boot
+            .iter()
+            .any(|s| s == "zram-init")
+    {
+        return Err(SystemInstallError::InvalidPlan(
+            "swap policy requires zram-init in services.openrc.boot".to_owned(),
+        ));
+    }
+    if authoritative_openrc && manifest.disk.layout == DiskLayout::Zfs {
+        for required in ["zfs-import", "zfs-mount"] {
+            if !manifest
+                .services
+                .openrc
+                .boot
+                .iter()
+                .any(|service| service == required)
+            {
+                return Err(SystemInstallError::InvalidPlan(format!(
+                    "ZFS requires {required} in services.openrc.boot"
+                )));
+            }
+        }
+    }
+    let manifest = resolved_swap.materialize_manifest(&manifest);
 
     let source = exec::ensure_trailing_slash(source_root);
     let target = exec::ensure_trailing_slash(target_mount);
@@ -121,6 +162,12 @@ pub fn plan_system_install(
     steps.push(SystemInstallStep::GenerateFstab {
         description: "Write target fstab".to_owned(),
         disk: manifest.disk.clone(),
+        resolved_swap: resolved_swap.clone(),
+        target_mount: target_mount.to_path_buf(),
+    });
+    steps.push(SystemInstallStep::ConfigureSwap {
+        description: "Configure target swap policy".to_owned(),
+        resolved_swap: resolved_swap.clone(),
         target_mount: target_mount.to_path_buf(),
     });
     steps.push(SystemInstallStep::ResetMachineId {
@@ -237,7 +284,11 @@ pub fn plan_system_install(
             });
         }
     }
-    if !services::openrc_enabled_services(&manifest).is_empty()
+    if (manifest.init_system == InitSystem::Openrc
+        && (authoritative_openrc
+            || !manifest.services.enabled.is_empty()
+            || manifest.disk.layout == DiskLayout::Zfs))
+        || !manifest.services.enabled.is_empty()
         || !manifest.services.disabled.is_empty()
     {
         match manifest.init_system {
@@ -275,6 +326,7 @@ pub fn plan_system_install(
     steps.push(SystemInstallStep::Finalize {
         description: "Finalize installation (unmount and export)".to_owned(),
         manifest: manifest.clone(),
+        resolved_swap: resolved_swap.clone(),
         target_mount: target_mount.to_path_buf(),
     });
     Ok(SystemInstallPlan {
@@ -284,5 +336,6 @@ pub fn plan_system_install(
         resolved_session,
         resolved_graphics,
         resolved_kernel_cmdline,
+        resolved_swap,
     })
 }

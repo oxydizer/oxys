@@ -30,7 +30,7 @@ RUN emerge-webrsync \
 
 # Install our kmerge.sh override (see catalyst-overrides/kmerge.sh for why)
 # over catalyst's own copy, so the ISO build never emerges/compiles its own
-# kernel or zfs-kmod -- it injects oxys-build's tagged tarballs instead.
+# kernel or zfs-kmod -- it injects oxys-build's published tarballs instead.
 # Path VERIFIED against catalyst's documented default sharedir; if this COPY
 # fails on a catalyst version bump, confirm the real path with:
 #   equery files dev-util/catalyst | grep kmerge.sh

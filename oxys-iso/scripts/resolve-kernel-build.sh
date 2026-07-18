@@ -1,17 +1,15 @@
 #!/usr/bin/env bash
-# resolve-kernel-build.sh - locate and verify a build-id-tagged kernel +
-# zfs-kmod + zfs (userland) tarball set produced by oxys-build, for a given
-# arch.
+# resolve-kernel-build.sh - locate and verify the kernel + zfs-kmod + zfs
+# (userland) artifact set produced by oxys-build for a given arch.
 #
 # This is the single place that decides "which kernel does the ISO ship."
-# oxys-build/podman/scripts/oxys-build-packages.sh writes one .metadata
-# sidecar per archive (build_id, arch, atom, version, kernel_release, ...).
-# We trust ONLY those metadata contents to pair artifacts together, never
-# filenames -- same discipline as the vermagic check in oxys-build-packages.sh.
+# oxys-build publishes the exact stable archive names in kernel-artifacts.env
+# only after all three archives have completed. Each archive also has a
+# .metadata sidecar (build_id, arch, atom, version, kernel_release, ...).
+# Metadata remains authoritative for pairing and branding checks.
 #
 # Usage:
 #   OXYS_ARCH=alderlake ./resolve-kernel-build.sh
-#   OXYS_ARCH=alderlake OXYS_KERNEL_BUILD_ID=20260706T011218Z-gentoo-20260706T003749Z ./resolve-kernel-build.sh
 #
 # On success: prints resolved paths as KEY=value lines on stdout (meant to be
 # `source`d) and exits 0. On any failure: prints a clear error to stderr and
@@ -36,79 +34,48 @@ ARCH_DIR="${OUTPUT_ROOT}/${ARCH}"
 
 [[ -d "${ARCH_DIR}" ]] || die "no oxys-build output for arch '${ARCH}' at ${ARCH_DIR}. Run oxys-build for this arch first."
 
-if [[ -n "${OXYS_KERNEL_BUILD_ID:-}" ]]; then
-	BUILD_ID="${OXYS_KERNEL_BUILD_ID}"
-else
-	BUILD_ID_FILE="${ARCH_DIR}/build-id"
-	[[ -f "${BUILD_ID_FILE}" ]] || die "OXYS_KERNEL_BUILD_ID not set and no ${BUILD_ID_FILE} to default from."
-	BUILD_ID="$(<"${BUILD_ID_FILE}")"
-	[[ -n "${BUILD_ID}" ]] || die "${BUILD_ID_FILE} is empty."
-fi
-
 # metadata_field FILE KEY - value of the first "KEY=..." line, first '=' only.
 metadata_field() {
 	local file="$1" key="$2"
 	awk -F'=' -v k="${key}" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "${file}"
 }
 
-KERNEL_METADATA="" KERNEL_TARBALL=""
-ZFS_KMOD_METADATA="" ZFS_KMOD_TARBALL=""
-ZFS_USERLAND_METADATA="" ZFS_USERLAND_TARBALL=""
-KERNEL_CREATED="" ZFS_KMOD_CREATED="" ZFS_USERLAND_CREATED=""
+ARTIFACTS_FILE="${ARCH_DIR}/kernel-artifacts.env"
+[[ -f "${ARTIFACTS_FILE}" ]] || die "no ${ARTIFACTS_FILE}; run the oxys-build kernel profile for arch=${ARCH}."
 
-shopt -s nullglob
-for meta in "${ARCH_DIR}"/*.metadata; do
-	found_build_id="$(metadata_field "${meta}" build_id)"
-	[[ "${found_build_id}" == "${BUILD_ID}" ]] || continue
+BUILD_ID="$(metadata_field "${ARTIFACTS_FILE}" build_id)"
+MANIFEST_ARCH="$(metadata_field "${ARTIFACTS_FILE}" arch)"
+KERNEL_ARCHIVE="$(metadata_field "${ARTIFACTS_FILE}" kernel_archive)"
+ZFS_KMOD_ARCHIVE="$(metadata_field "${ARTIFACTS_FILE}" zfs_kmod_archive)"
+ZFS_USERLAND_ARCHIVE="$(metadata_field "${ARTIFACTS_FILE}" zfs_userland_archive)"
+[[ -n "${BUILD_ID}" ]] || die "${ARTIFACTS_FILE} has no build_id field."
+[[ "${MANIFEST_ARCH}" == "${ARCH}" ]] || die "${ARTIFACTS_FILE} records arch=${MANIFEST_ARCH}, expected ${ARCH}."
 
-	# Strip a possible leading '=' (pre-existing quirk in older metadata:
-	# atoms carrying a Portage version pin, e.g. "=sys-fs/zfs-kmod-2.3.8",
-	# were written verbatim as "atom==sys-fs/zfs-kmod-2.3.8"). Don't trust
-	# the filename to disambiguate -- only the atom field.
-	atom="$(metadata_field "${meta}" atom)"
-	atom="${atom#=}"
-	archive_name="$(metadata_field "${meta}" archive)"
-	[[ -n "${archive_name}" ]] || die "malformed metadata (no archive= line): ${meta}"
-	archive_path="${ARCH_DIR}/${archive_name}"
-	[[ -f "${archive_path}" ]] || die "metadata ${meta} names archive ${archive_name}, but it doesn't exist at ${archive_path}"
-	created_utc="$(metadata_field "${meta}" created_utc)"
-	[[ -n "${created_utc}" ]] || die "malformed metadata (no created_utc= line): ${meta}"
-
-	case "${atom}" in
-	sys-kernel/gentoo-sources*)
-		if [[ -z "${KERNEL_CREATED}" || "${created_utc}" > "${KERNEL_CREATED}" ]]; then
-			KERNEL_METADATA="${meta}"
-			KERNEL_TARBALL="${archive_path}"
-			KERNEL_CREATED="${created_utc}"
-		elif [[ "${created_utc}" == "${KERNEL_CREATED}" && "${meta}" != "${KERNEL_METADATA}" ]]; then
-			die "ambiguous kernel metadata with identical created_utc=${created_utc}: ${KERNEL_METADATA} and ${meta}"
-		fi
-		;;
-	sys-fs/zfs-kmod-*)
-		if [[ -z "${ZFS_KMOD_CREATED}" || "${created_utc}" > "${ZFS_KMOD_CREATED}" ]]; then
-			ZFS_KMOD_METADATA="${meta}"
-			ZFS_KMOD_TARBALL="${archive_path}"
-			ZFS_KMOD_CREATED="${created_utc}"
-		elif [[ "${created_utc}" == "${ZFS_KMOD_CREATED}" && "${meta}" != "${ZFS_KMOD_METADATA}" ]]; then
-			die "ambiguous zfs-kmod metadata with identical created_utc=${created_utc}: ${ZFS_KMOD_METADATA} and ${meta}"
-		fi
-		;;
-	sys-fs/zfs-[0-9]*)
-		if [[ -z "${ZFS_USERLAND_CREATED}" || "${created_utc}" > "${ZFS_USERLAND_CREATED}" ]]; then
-			ZFS_USERLAND_METADATA="${meta}"
-			ZFS_USERLAND_TARBALL="${archive_path}"
-			ZFS_USERLAND_CREATED="${created_utc}"
-		elif [[ "${created_utc}" == "${ZFS_USERLAND_CREATED}" && "${meta}" != "${ZFS_USERLAND_METADATA}" ]]; then
-			die "ambiguous zfs metadata with identical created_utc=${created_utc}: ${ZFS_USERLAND_METADATA} and ${meta}"
-		fi
-		;;
-	esac
+for archive in "${KERNEL_ARCHIVE}" "${ZFS_KMOD_ARCHIVE}" "${ZFS_USERLAND_ARCHIVE}"; do
+	[[ -n "${archive}" && "${archive}" == "$(basename "${archive}")" && "${archive}" == *.tar.gz ]] || die "invalid archive name '${archive}' in ${ARTIFACTS_FILE}."
+	[[ -f "${ARCH_DIR}/${archive}" ]] || die "published archive is missing: ${ARCH_DIR}/${archive}"
+	[[ -f "${ARCH_DIR}/${archive%.tar.gz}.metadata" ]] || die "published metadata is missing: ${ARCH_DIR}/${archive%.tar.gz}.metadata"
 done
-shopt -u nullglob
 
-[[ -n "${KERNEL_TARBALL}" ]] || die "no kernel (sys-kernel/gentoo-sources) archive found for arch=${ARCH} build_id=${BUILD_ID} under ${ARCH_DIR}. Run oxys-build for this arch/build-id first."
-[[ -n "${ZFS_KMOD_TARBALL}" ]] || die "no zfs-kmod (sys-fs/zfs-kmod) archive found for arch=${ARCH} build_id=${BUILD_ID} under ${ARCH_DIR}. Run oxys-build for this arch/build-id first."
-[[ -n "${ZFS_USERLAND_TARBALL}" ]] || die "no zfs userland (sys-fs/zfs) archive found for arch=${ARCH} build_id=${BUILD_ID} under ${ARCH_DIR}. Run oxys-build for this arch/build-id first."
+KERNEL_TARBALL="${ARCH_DIR}/${KERNEL_ARCHIVE}"
+ZFS_KMOD_TARBALL="${ARCH_DIR}/${ZFS_KMOD_ARCHIVE}"
+ZFS_USERLAND_TARBALL="${ARCH_DIR}/${ZFS_USERLAND_ARCHIVE}"
+KERNEL_METADATA="${ARCH_DIR}/${KERNEL_ARCHIVE%.tar.gz}.metadata"
+ZFS_KMOD_METADATA="${ARCH_DIR}/${ZFS_KMOD_ARCHIVE%.tar.gz}.metadata"
+ZFS_USERLAND_METADATA="${ARCH_DIR}/${ZFS_USERLAND_ARCHIVE%.tar.gz}.metadata"
+
+for metadata in "${KERNEL_METADATA}" "${ZFS_KMOD_METADATA}" "${ZFS_USERLAND_METADATA}"; do
+	[[ "$(metadata_field "${metadata}" build_id)" == "${BUILD_ID}" ]] || die "artifact set is incomplete: ${metadata} does not match build_id=${BUILD_ID}."
+	[[ "$(metadata_field "${metadata}" arch)" == "${ARCH}" ]] || die "artifact architecture mismatch in ${metadata}."
+done
+
+[[ "$(metadata_field "${KERNEL_METADATA}" archive)" == "${KERNEL_ARCHIVE}" ]] || die "kernel metadata does not name ${KERNEL_ARCHIVE}."
+[[ "$(metadata_field "${ZFS_KMOD_METADATA}" archive)" == "${ZFS_KMOD_ARCHIVE}" ]] || die "zfs-kmod metadata does not name ${ZFS_KMOD_ARCHIVE}."
+[[ "$(metadata_field "${ZFS_USERLAND_METADATA}" archive)" == "${ZFS_USERLAND_ARCHIVE}" ]] || die "zfs metadata does not name ${ZFS_USERLAND_ARCHIVE}."
+
+[[ "$(metadata_field "${KERNEL_METADATA}" atom)" == sys-kernel/gentoo-sources* ]] || die "kernel metadata has the wrong atom: ${KERNEL_METADATA}"
+[[ "$(metadata_field "${ZFS_KMOD_METADATA}" atom)" == sys-fs/zfs-kmod-* ]] || die "zfs-kmod metadata has the wrong atom: ${ZFS_KMOD_METADATA}"
+[[ "$(metadata_field "${ZFS_USERLAND_METADATA}" atom)" == sys-fs/zfs-[0-9]* ]] || die "zfs metadata has the wrong atom: ${ZFS_USERLAND_METADATA}"
 
 KERNEL_RELEASE="$(metadata_field "${KERNEL_METADATA}" kernel_release)"
 ZFS_KMOD_KERNEL_RELEASE="$(metadata_field "${ZFS_KMOD_METADATA}" kernel_release)"
@@ -123,7 +90,7 @@ if [[ -n "${OXYS_DRM_DRIVERS:-}" ]]; then
 	requested=" ${OXYS_DRM_DRIVERS//,/ } "
 	available=" ${KERNEL_DRM_DRIVERS} "
 	for driver in ${requested}; do
-		[[ "${available}" == *" ${driver} "* ]] || die "kernel build ${BUILD_ID} lacks requested DRM driver '${driver}' (built: ${KERNEL_DRM_DRIVERS:-unrecorded}). Rebuild oxys-build with matching OXYS_DRM_DRIVERS."
+		[[ "${available}" == *" ${driver} "* ]] || die "kernel artifact lacks requested DRM driver '${driver}' (built: ${KERNEL_DRM_DRIVERS:-unrecorded}). Rebuild oxys-build with matching OXYS_DRM_DRIVERS."
 	done
 fi
 

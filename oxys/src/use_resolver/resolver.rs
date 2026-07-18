@@ -8,8 +8,8 @@ use crate::manifest::{
 };
 
 use super::{
-    load_or_parse_metadata, run_emerge, write_portage_plan_config, Conflict, DecisionSource,
-    EmergeStream, PackageMetadata, PortagePlan, UseResolution, UseResolverError,
+    Conflict, DecisionSource, EmergeStream, PackageMetadata, PortagePlan, UseResolution,
+    UseResolverError, load_or_parse_metadata, run_emerge, write_portage_plan_config,
 };
 
 use super::repo::{discover_repo_roots, find_metadata_path, list_package_versions};
@@ -403,7 +403,11 @@ pub(crate) struct PackageState {
 }
 
 impl PackageState {
-    pub(crate) fn new(manifest: ManifestPackage, metadata: PackageMetadata, prefer_binary: bool) -> Self {
+    pub(crate) fn new(
+        manifest: ManifestPackage,
+        metadata: PackageMetadata,
+        prefer_binary: bool,
+    ) -> Self {
         let binary_requested = !manifest.from_source && (prefer_binary || manifest.binary);
         let has_custom_use = manifest.use_flags.iter().any(|token| {
             let flag = token.trim().trim_start_matches('-');

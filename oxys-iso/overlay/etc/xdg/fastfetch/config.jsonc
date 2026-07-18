@@ -1,0 +1,12 @@
+{
+    "logo": {
+        "type": "file",
+        "source": "/etc/xdg/fastfetch/oxysos.txt",
+        "color": {
+            "1": "magenta"
+        },
+        "padding": {
+            "right": 2
+        }
+    }
+}

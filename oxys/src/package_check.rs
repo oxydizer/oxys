@@ -278,10 +278,7 @@ mod tests {
 
     #[test]
     fn exact_name_in_other_category_ranks_first() {
-        let idx = index(&[
-            ("app-misc", &["curl"]),
-            ("net-misc", &["curl", "curli"]),
-        ]);
+        let idx = index(&[("app-misc", &["curl"]), ("net-misc", &["curl", "curli"])]);
         let suggestions = idx.suggest("net-mist", "curl");
         // Both categories carry an exact-name match (tier 0), ordered by
         // category distance: net-misc (2 edits) before app-misc.

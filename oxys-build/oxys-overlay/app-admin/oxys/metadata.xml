@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+	<longdescription>
+		Oxys manages the declarative system manifest and coordinates guarded
+		Portage operations on OxysOS.
+	</longdescription>
+	<upstream>
+		<remote-id type="github">oxydizer/oxys</remote-id>
+	</upstream>
+</pkgmetadata>

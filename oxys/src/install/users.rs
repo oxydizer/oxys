@@ -10,7 +10,7 @@ use crate::{
     manifest::{Password, User},
 };
 
-use super::{run_chroot, write_wheel_sudoers, SystemInstallError, SystemInstallEvent};
+use super::{SystemInstallError, SystemInstallEvent, run_chroot, write_wheel_sudoers};
 
 pub(super) fn setup_users(
     users: &[User],
@@ -48,6 +48,19 @@ pub(super) fn setup_users(
             line: "granted wheel group sudo via /etc/sudoers.d/wheel".to_owned(),
         });
     }
+
+    // Lock the root account on the installed target. The live ISO sets a
+    // throwaway password on root for tty recovery, but the installed system
+    // should be hardened: root is inaccessible directly, and the first
+    // wheel user reaches it via sudo. `passwd -l` writes '!' into /etc/shadow.
+    run_chroot(
+        &target,
+        &["passwd".to_owned(), "-l".to_owned(), "root".to_owned()],
+        sender,
+    )?;
+    let _ = sender.send(SystemInstallEvent::StepOutput {
+        line: "locked root account (! in /etc/shadow); use sudo from a wheel user".to_owned(),
+    });
 
     Ok(())
 }

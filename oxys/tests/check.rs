@@ -123,8 +123,8 @@ fn check_exits_nonzero_and_reports_specific_conflict() -> Result<(), Box<dyn std
 }
 
 #[test]
-fn check_reports_use_flags_vs_global_prefer_binary_as_warning_not_error_end_to_end(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn check_reports_use_flags_vs_global_prefer_binary_as_warning_not_error_end_to_end()
+-> Result<(), Box<dyn std::error::Error>> {
     // End-to-end via the oxys binary (not just resolver lib): global
     // prefer_binary + use_flags without .from_source() falls back to source
     // for that package and just warns, rather than blocking the whole plan.
@@ -167,16 +167,18 @@ fn check_reports_use_flags_vs_global_prefer_binary_as_warning_not_error_end_to_e
 }
 
 #[test]
-fn check_from_source_allows_use_flags_even_with_global_prefer_binary(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn check_from_source_allows_use_flags_even_with_global_prefer_binary()
+-> Result<(), Box<dyn std::error::Error>> {
     let fixture = FixtureRepo::new().with_package("gui-wm/niri", &["wayland", "screencast"]);
 
     let workdir = tempfile::TempDir::new()?;
     let manifest = SystemManifest {
         prefer_binary: true,
-        packages: vec![Package::new("gui-wm/niri")
-            .from_source()
-            .use_flags(["screencast"])],
+        packages: vec![
+            Package::new("gui-wm/niri")
+                .from_source()
+                .use_flags(["screencast"]),
+        ],
         ..SystemManifest::default()
     };
     let toml = manifest_to_toml(&manifest)?;

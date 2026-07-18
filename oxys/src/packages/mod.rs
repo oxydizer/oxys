@@ -31,6 +31,68 @@ pub fn build(reference_root: &Path, atom: &str, output: &Path) -> Result<Metadat
     format::write_artifact(output, captured.metadata, captured.entries)
 }
 
+/// Build an artifact in `output_dir` using the canonical display filename.
+///
+/// The filename is not package identity (the signed metadata and digest are),
+/// but retaining the architecture and CPU baseline here prevents artifacts for
+/// different microarchitectures from overwriting or masquerading as each other
+/// in a local package directory.
+pub fn build_named(
+    reference_root: &Path,
+    atom: &str,
+    output_dir: &Path,
+) -> Result<(Metadata, PathBuf)> {
+    let captured = vdb::capture(reference_root, atom)?;
+    let output = output_dir.join(artifact_filename(&captured.metadata));
+    let metadata = format::write_artifact(&output, captured.metadata, captured.entries)?;
+    Ok((metadata, output))
+}
+
+/// Return the conventional filename for an artifact's metadata.
+///
+/// For example, a second build of `niri-25.11-r1` for x86-64-v3 is named
+/// `niri-25.11-r1-r2-x86_64-v3.oxys`.
+pub fn artifact_filename(metadata: &Metadata) -> String {
+    let revision = (metadata.revision != 0).then(|| format!("-r{}", metadata.revision));
+    format!(
+        "{}{}-{}.oxys",
+        metadata.portage.pf,
+        revision.as_deref().unwrap_or_default(),
+        target_filename(&metadata.target.triple, &metadata.target.cpu),
+    )
+}
+
+fn target_filename(triple: &str, cpu: &str) -> String {
+    let architecture = filename_component(triple.split('-').next().unwrap_or(triple));
+    let cpu = match cpu {
+        "x86-64" | "x86_64" | "generic" if architecture == "x86_64" => None,
+        value if value == architecture => None,
+        value if architecture == "x86_64" => value
+            .strip_prefix("x86-64-")
+            .or_else(|| value.strip_prefix("x86_64-")),
+        value => Some(value),
+    };
+    match cpu {
+        Some(cpu) if !cpu.is_empty() => {
+            format!("{architecture}-{}", filename_component(cpu))
+        }
+        _ => architecture,
+    }
+}
+
+fn filename_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '+' | '-' | '.' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Fully verify an artifact without changing a filesystem.
 pub fn verify(path: &Path) -> Result<Metadata> {
     Ok(format::read_artifact(path)?.metadata)

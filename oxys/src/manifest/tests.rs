@@ -6,14 +6,14 @@ fn native_march_has_no_binhost_url() {
 }
 
 #[test]
-fn baseline_marches_map_to_gentoo_binhost_urls() {
+fn baseline_marches_map_to_short_oxys_binhost_urls() {
     assert_eq!(
         March::X86_64.binhost_url().as_deref(),
-        Some("https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64/")
+        Some("https://packages.oxysos.org/x86-64/ https://kernel.oxysos.org/x86-64/")
     );
     assert_eq!(
         March::X86_64V3.binhost_url().as_deref(),
-        Some("https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64-v3/")
+        Some("https://packages.oxysos.org/x86-64-v3/ https://kernel.oxysos.org/x86-64-v3/")
     );
 }
 
@@ -76,11 +76,13 @@ fn timezone_from_str_builds_a_literal() {
     };
     assert_eq!(os.timezone, Timezone::Literal("Europe/London".into()));
     assert_eq!(os.timezone.as_str(), "Europe/London");
-    assert!(!SystemManifest {
-        os,
-        ..SystemManifest::default()
-    }
-    .prompts_timezone());
+    assert!(
+        !SystemManifest {
+            os,
+            ..SystemManifest::default()
+        }
+        .prompts_timezone()
+    );
 }
 
 #[test]

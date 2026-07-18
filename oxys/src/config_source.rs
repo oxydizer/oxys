@@ -28,7 +28,10 @@ pub enum ConfigSourceError {
 /// Returns `Ok(Some(new_source))` when the atom was inserted, `Ok(None)` when the
 /// atom is already present (no-op), or an error for an invalid atom / a source with
 /// no packages vec.
-pub fn add_package_to_source(source: &str, atom: &str) -> Result<Option<String>, ConfigSourceError> {
+pub fn add_package_to_source(
+    source: &str,
+    atom: &str,
+) -> Result<Option<String>, ConfigSourceError> {
     let atom = atom.trim();
     validate_atom(atom)?;
 
@@ -46,7 +49,10 @@ pub fn add_package_to_source(source: &str, atom: &str) -> Result<Option<String>,
 
     // Is the closing `]` alone on its own line (the common multi-line vec)? If so,
     // splice the new entry as a preceding line so the closing bracket stays put.
-    let line_start = source[..close_idx].rfind('\n').map(|nl| nl + 1).unwrap_or(0);
+    let line_start = source[..close_idx]
+        .rfind('\n')
+        .map(|nl| nl + 1)
+        .unwrap_or(0);
     let closing_lead = &source[line_start..close_idx];
     let mut out = String::with_capacity(source.len() + new_entry.len() + 2);
     if closing_lead.trim().is_empty() {
@@ -213,15 +219,25 @@ pub fn config() -> Oxys {
 
     #[test]
     fn dedupes_existing_atom_even_with_builder_chain() {
-        assert!(add_package_to_source(SAMPLE, "net-misc/curl").unwrap().is_none());
-        assert!(add_package_to_source(SAMPLE, "dev-vcs/git").unwrap().is_none());
+        assert!(
+            add_package_to_source(SAMPLE, "net-misc/curl")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            add_package_to_source(SAMPLE, "dev-vcs/git")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn nested_brackets_do_not_confuse_the_matcher() {
         // The `.keywords(["**"])` on the last entry has nested brackets right
         // before the closing `]`; insertion must still land in the outer vec.
-        let out = add_package_to_source(SAMPLE, "app-shells/fish").unwrap().unwrap();
+        let out = add_package_to_source(SAMPLE, "app-shells/fish")
+            .unwrap()
+            .unwrap();
         let neovim_at = out.find("app-shells/fish").unwrap();
         let close_at = out.find("],").unwrap();
         assert!(neovim_at < close_at);
@@ -229,8 +245,12 @@ pub fn config() -> Oxys {
 
     #[test]
     fn multiple_sequential_inserts_accumulate() {
-        let step1 = add_package_to_source(SAMPLE, "app-editors/neovim").unwrap().unwrap();
-        let step2 = add_package_to_source(&step1, "app-shells/fish").unwrap().unwrap();
+        let step1 = add_package_to_source(SAMPLE, "app-editors/neovim")
+            .unwrap()
+            .unwrap();
+        let step2 = add_package_to_source(&step1, "app-shells/fish")
+            .unwrap()
+            .unwrap();
         assert!(step2.contains("Package::new(\"app-editors/neovim\"),"));
         assert!(step2.contains("Package::new(\"app-shells/fish\"),"));
     }
@@ -238,7 +258,9 @@ pub fn config() -> Oxys {
     #[test]
     fn expands_inline_empty_vec() {
         let src = "    Oxys { packages: vec![], ..Default::default() }";
-        let out = add_package_to_source(src, "net-misc/curl").unwrap().unwrap();
+        let out = add_package_to_source(src, "net-misc/curl")
+            .unwrap()
+            .unwrap();
         assert!(out.contains("Package::new(\"net-misc/curl\"),"));
     }
 

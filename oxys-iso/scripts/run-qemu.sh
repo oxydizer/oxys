@@ -33,6 +33,17 @@ INSTALL_DISK_SIZE="${OXYS_DISK_SIZE:-24G}"
 INSTALL_DISK_PATH="${OXYS_DISK:-}"
 SHARE_DIR="${OXYS_SHARE:-}"
 
+available_cpus() {
+    local count=""
+    if command -v nproc >/dev/null 2>&1; then
+        count="$(nproc 2>/dev/null || true)"
+    elif command -v getconf >/dev/null 2>&1; then
+        count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
+    fi
+    [[ "$count" =~ ^[1-9][0-9]*$ ]] || count=1
+    printf '%s\n' "$count"
+}
+
 usage() {
     cat >&2 <<EOF
 Usage: $0 [iso] [uefi|bios] [disk=SIZE|no-disk] [persist] [share=PATH]
@@ -52,6 +63,7 @@ Environment:
   OXYS_DISK_SIZE
                 Size for a newly created install target disk, default: 24G
   OXYS_RES      Guest display resolution WIDTHxHEIGHT, default: 1280x800
+  OXYS_CPUS     Guest logical CPUs, default: half of host-available CPUs
   OXYS_SHARE    Host directory to expose to the guest with mount tag hostshare
   NET=0         Disable the default QEMU user-mode NAT network
   GL=0          Disable virgl/OpenGL display acceleration
@@ -85,6 +97,18 @@ for arg in "$@"; do
         exit 1
     fi
 done
+
+if [[ -n "${OXYS_CPUS:-}" ]]; then
+    QEMU_CPUS="${OXYS_CPUS}"
+else
+    HOST_CPUS="$(available_cpus)"
+    QEMU_CPUS=$((HOST_CPUS / 2))
+    (( QEMU_CPUS >= 1 )) || QEMU_CPUS=1
+fi
+if [[ ! "$QEMU_CPUS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "OXYS_CPUS must be a positive integer (got '${QEMU_CPUS}')." >&2
+    exit 1
+fi
 
 find_newest_iso() {
     local dir="$1"
@@ -167,7 +191,7 @@ fi
 ARGS=(
     -enable-kvm
     -m 8192
-    -smp 2
+    -smp "$QEMU_CPUS"
     -machine q35
     -cpu host
     -boot menu=on
@@ -292,7 +316,7 @@ if [[ "$PERSIST" == "persist" ]]; then
     ARGS+=(-drive "file=${DISK},if=virtio,format=qcow2")
 fi
 
-echo ":: Launching QEMU with $(basename "$ISO") (${MODE}${INSTALL_DISK:+, install disk}${PERSIST:+, $PERSIST}) ..."
+echo ":: Launching QEMU with $(basename "$ISO") (${MODE}${INSTALL_DISK:+, install disk}${PERSIST:+, $PERSIST}, ${QEMU_CPUS} vCPU) ..."
 printf ':: QEMU command:' >&2
 printf ' %q' "${QEMU_BIN}" "${ARGS[@]}" >&2
 printf '\n' >&2

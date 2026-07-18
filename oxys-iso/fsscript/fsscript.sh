@@ -3,10 +3,11 @@
 # ---------------------------------------------------------------------------
 # Responsibilities:
 #   1. Remove build-only offline Git source policy.
-#   2. Make the injected installer binary executable.
-#   3. Ensure the ZFS kernel module is loaded BEFORE the installer runs.
-#   4. Autologin root on tty1 and exec the installer there.
-#   5. Assert live networking and enable the QEMU recovery console.
+#   2. Assert the Oxys CLI is installed and owned by app-admin/oxys.
+#   3. Make the injected installer binary executable.
+#   4. Ensure the ZFS kernel module is loaded BEFORE the installer runs.
+#   5. Autologin root on tty1 and exec the installer there.
+#   6. Assert live networking and enable the QEMU recovery console.
 #
 # catalyst copies this script into the chroot and executes it, so all paths
 # below are relative to the live root filesystem.
@@ -14,6 +15,11 @@
 set -euo pipefail
 
 INSTALLER=/usr/local/bin/oxys-installer
+OXYS_CLI=/usr/bin/oxys
+LEGACY_OXYS_CLI=/usr/local/bin/oxys
+FASTFETCH=/usr/bin/fastfetch
+FASTFETCH_CONFIG=/etc/xdg/fastfetch/config.jsonc
+FASTFETCH_LOGO=/etc/xdg/fastfetch/oxysos.txt
 
 # Brand the live kernel nodename. Gentoo/OpenRC reads /etc/conf.d/hostname;
 # /etc/hostname is written too for tools that follow the cross-distro path.
@@ -73,6 +79,37 @@ if [[ ! -x /etc/init.d/seatd ]]; then
 	exit 1
 fi
 
+# Swap policy is applied on the installed OpenRC system by zram-init. Shipping
+# only the kernel driver (or the systemd-only zram-generator wrapper) would
+# leave the generated /etc/conf.d/zram-init unused at boot.
+if [[ ! -x /etc/init.d/zram-init ]]; then
+	echo "fsscript: FATAL: /etc/init.d/zram-init is missing." >&2
+	echo "  sys-block/zram-init must be installed for OpenRC zram swap." >&2
+	exit 1
+fi
+
+# Fastfetch is part of the live and installed base experience. Its XDG config
+# points at a separate logo file, so assert the package and both branding files
+# together rather than allowing an image with a missing or fallback logo.
+if [[ ! -x ${FASTFETCH} ]]; then
+	echo "fsscript: FATAL: ${FASTFETCH} is missing or not executable." >&2
+	exit 1
+fi
+for branding_file in "${FASTFETCH_CONFIG}" "${FASTFETCH_LOGO}"; do
+	if [[ ! -s ${branding_file} ]]; then
+		echo "fsscript: FATAL: Fastfetch branding file ${branding_file} is missing or empty." >&2
+		exit 1
+	fi
+done
+
+KERNEL_CONFIG=/usr/src/oxysos/kernel.config
+for option in SWAP ZRAM ZRAM_BACKEND_ZSTD; do
+	if ! grep -qE "^CONFIG_${option}=[ym]$" "${KERNEL_CONFIG}"; then
+		echo "fsscript: FATAL: CONFIG_${option} is missing from ${KERNEL_CONFIG}." >&2
+		exit 1
+	fi
+done
+
 # A virtio GPU still exposes card0/renderD128 when Mesa lacks its virgl driver,
 # which makes QEMU look healthy while Niri cannot create an accelerated EGL
 # renderer. Assert the actual driver rather than trusting VIDEO_CARDS or the
@@ -91,6 +128,21 @@ if [[ ! -x /etc/init.d/NetworkManager || ! -x /usr/bin/NetworkManager ]]; then
 	echo "fsscript: FATAL: NetworkManager or its OpenRC service is missing." >&2
 	exit 1
 fi
+if [[ ! -x /etc/init.d/modemmanager || ! -x /usr/sbin/ModemManager ]]; then
+	echo "fsscript: FATAL: ModemManager or its OpenRC service is missing." >&2
+	exit 1
+fi
+MODEMMANAGER_CONF=/etc/conf.d/modemmanager
+if [[ ! -f ${MODEMMANAGER_CONF} ]]; then
+	echo "fsscript: FATAL: /etc/conf.d/modemmanager log redirection is missing." >&2
+	exit 1
+fi
+if ! grep -qx 'rc_before="NetworkManager"' "${MODEMMANAGER_CONF}" \
+	|| ! grep -qx 'output_log="/var/log/modemmanager.log"' "${MODEMMANAGER_CONF}" \
+	|| ! grep -qx 'error_log="/var/log/modemmanager.log"' "${MODEMMANAGER_CONF}"; then
+	echo "fsscript: FATAL: ${MODEMMANAGER_CONF} does not isolate ModemManager from tty1." >&2
+	exit 1
+fi
 if [[ ! -f ${NM_WIRED} ]]; then
 	echo "fsscript: FATAL: ${NM_WIRED} is missing." >&2
 	exit 1
@@ -105,12 +157,57 @@ chmod 0600 "${NM_WIRED}"
 rm -f /etc/portage/package.env/prefetched-git-sources \
 	/etc/portage/env/prefetched-git-source.conf
 
-# --- 2. installer binary (delivered via livecd/overlay) ---------------------
+# --- 2. Portage-owned Oxys CLI ----------------------------------------------
+if [[ ! -x ${OXYS_CLI} ]]; then
+	echo "fsscript: FATAL: ${OXYS_CLI} is missing or not executable." >&2
+	echo "  app-admin/oxys must be emerged during livecd-stage1." >&2
+	exit 1
+fi
+if [[ -e ${LEGACY_OXYS_CLI} ]]; then
+	echo "fsscript: FATAL: obsolete ${LEGACY_OXYS_CLI} is present." >&2
+	echo "  It would shadow the Portage-owned ${OXYS_CLI} after self-update." >&2
+	exit 1
+fi
+
+mapfile -t oxys_vdb_entries < <(
+	find /var/db/pkg/app-admin -mindepth 1 -maxdepth 1 -type d -name 'oxys-[0-9]*' -print 2>/dev/null || true
+)
+if (( ${#oxys_vdb_entries[@]} != 1 )); then
+	echo "fsscript: FATAL: expected exactly one app-admin/oxys VDB entry, found ${#oxys_vdb_entries[@]}." >&2
+	exit 1
+fi
+if ! awk '$1 == "obj" && $2 == "/usr/bin/oxys" { found = 1 } END { exit found ? 0 : 1 }' \
+	"${oxys_vdb_entries[0]}/CONTENTS"; then
+	echo "fsscript: FATAL: app-admin/oxys does not own /usr/bin/oxys in VDB CONTENTS." >&2
+	exit 1
+fi
+oxys_pf="${oxys_vdb_entries[0]##*/}"
+oxys_package_version="${oxys_pf#oxys-}"
+# Gentoo package revisions (-r1, -r2, ...) rebuild the same upstream version,
+# so the CLI embeds PV while the VDB directory records PVR.
+if [[ ${oxys_package_version} =~ ^(.+)-r[0-9]+$ ]]; then
+	oxys_package_version="${BASH_REMATCH[1]}"
+fi
+if [[ -z ${oxys_package_version} || ${oxys_pf} == "${oxys_package_version}" ]]; then
+	echo "fsscript: FATAL: cannot derive app-admin/oxys version from VDB entry '${oxys_pf}'." >&2
+	exit 1
+fi
+if ! oxys_version="$("${OXYS_CLI}" --version)"; then
+	echo "fsscript: FATAL: ${OXYS_CLI} cannot report its version." >&2
+	exit 1
+fi
+if [[ ${oxys_version} != "oxys ${oxys_package_version}" ]]; then
+	echo "fsscript: FATAL: ${OXYS_CLI} reports '${oxys_version}', but VDB owns app-admin/${oxys_pf}." >&2
+	exit 1
+fi
+echo "OxysOS fsscript: verified Portage-owned ${oxys_version}."
+
+# --- 3. installer binary (delivered via livecd/root_overlay) ----------------
 if [[ ! -x ${INSTALLER} ]]; then
 	chmod 0755 "${INSTALLER}"
 fi
 
-# --- 3. ZFS module load ordering -------------------------------------------
+# --- 4. ZFS module load ordering -------------------------------------------
 # Two complementary mechanisms, so the module is guaranteed present before the
 # installer touches any pool:
 #
@@ -127,7 +224,7 @@ if ! grep -q '^modules=.*zfs' /etc/conf.d/modules 2>/dev/null; then
 		>> /etc/conf.d/modules
 fi
 
-# --- 3b. Make root loginable on the live medium -----------------------------
+# --- 5. Make root loginable on the live medium ------------------------------
 # The base stage3 ships root LOCKED (`*` in /etc/shadow). tty1 autologins via
 # `login -f` (which bypasses auth), so it doesn't need this -- but tty2..tty6
 # (and any recovery if the installer wedges) are dead ends without a password.
@@ -137,7 +234,7 @@ fi
 # installed system sets its own credentials.
 echo 'root:oxys' | chpasswd
 
-# --- 4. Autologin root on tty1 (Gentoo OpenRC uses sysvinit + /etc/inittab) -
+# --- 6. Autologin root on tty1 (Gentoo OpenRC uses sysvinit + /etc/inittab) --
 # Rewrite the tty1 agetty line to auto-login root. Other ttys are untouched, so
 # tty2-6 still give a normal login prompt (handy if the installer wedges).
 if grep -qE '^c1:' /etc/inittab; then
@@ -160,7 +257,7 @@ else
 	printf 's0:12345:respawn:/sbin/agetty -L 115200 ttyS0 vt100\n' >> /etc/inittab
 fi
 
-# (4 cont.) On tty1, root's login shell launches the installer. The modprobe
+# (6 cont.) On tty1, root's login shell launches the installer. The modprobe
 # here is the authoritative ordering guarantee from (b) above. We deliberately
 # do NOT `exec` it: when the installer quits — whether it finished or failed —
 # the login shell falls through to an interactive prompt instead of agetty
@@ -182,7 +279,7 @@ fi
 PROFILE
 chmod 0644 /root/.bash_profile
 
-# --- 5. Pre-warm the config compile cache + stock prebuilt manifests -------
+# --- 7. Pre-warm the config compile cache ------------------------------------
 # The installer compiles the user's Rust config into a manifest on first use
 # (oxys::compile). Building the oxys dependency tree from cold would take
 # minutes; do it once here — in the stage2 chroot, which has the native
@@ -191,15 +288,13 @@ chmod 0644 /root/.bash_profile
 # scaffold layout exactly ($HOME/.cache/oxys/build + crate "oxys-config-scaffold"),
 # so cargo reuses this target cache verbatim at runtime.
 #
-# For the two stock profiles (desktop + base) we also *run* the scaffold once
-# each and stash the resulting manifest.toml under configs/prebuilt/, stamped
-# with the source .fe2o3 sha256. The installer reuses those when the user
-# advances without editing the profile (no cargo at all). Non-fatal on failure.
+# Configs are always executed on the installation machine: stock profiles use
+# hardware detection, so a manifest executed on the ISO builder is not valid
+# for an arbitrary target. The dependency cache remains safe to reuse.
 if command -v cargo >/dev/null 2>&1 && [[ -f /usr/src/oxys/Cargo.toml ]]; then
 	export HOME=/root
 	WARM=/root/.cache/oxys/build
-	PREBUILT=/root/configs/prebuilt
-	mkdir -p "${WARM}/src" "${PREBUILT}"
+	mkdir -p "${WARM}/src"
 	cat > "${WARM}/Cargo.toml" <<'SCAFFOLD'
 [package]
 name = "oxys-config-scaffold"
@@ -216,33 +311,9 @@ SCAFFOLD
 	else
 		echo "OxysOS fsscript: config compile pre-warm failed (non-fatal)." >&2
 	fi
-
-	# Produce prebuilt manifests for stock profiles. `cargo run` writes
-	# manifest.toml into the process cwd; land them under configs/prebuilt/.
-	for profile in desktop base; do
-		src="/root/configs/${profile}.fe2o3"
-		[[ -f "${src}" ]] || continue
-		cp "${src}" "${WARM}/src/main.rs"
-		rm -f /root/manifest.toml
-		if ( cd /root && cargo run --manifest-path "${WARM}/Cargo.toml" --quiet ); then
-			if [[ -f /root/manifest.toml ]]; then
-				install -m 0644 /root/manifest.toml \
-					"${PREBUILT}/${profile}.manifest.toml"
-				# Stamp is a bare hex digest (first field of sha256sum output).
-				sha256sum "${src}" | awk '{print $1}' \
-					> "${PREBUILT}/${profile}.source.sha256"
-				rm -f /root/manifest.toml
-				echo "OxysOS fsscript: prebuilt manifest for ${profile}."
-			else
-				echo "OxysOS fsscript: ${profile} compile produced no manifest (non-fatal)." >&2
-			fi
-		else
-			echo "OxysOS fsscript: prebuilt ${profile} failed (non-fatal)." >&2
-		fi
-	done
 fi
 
-# --- 6. Record the graphics capabilities of the finished image -------------
+# --- 8. Record the graphics capabilities of the finished image --------------
 # This is generated from installed VDB metadata, real driver artifacts, and
 # the injected kernel config. The installer consumes this contract before it
 # mutates a target. Older images without it can still be inspected directly.

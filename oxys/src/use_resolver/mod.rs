@@ -19,17 +19,17 @@ pub use crate::manifest::{
 pub use cache::{cache_path_for_metadata, load_or_parse_metadata, sync};
 /// Streams structured events from an `emerge` subprocess.
 pub use emerge::{
-    emerge_chroot_command_for_test, emerge_command_for_test, emerge_deselect,
-    emerge_deselect_command_for_test, emerge_depclean_pretend,
-    emerge_depclean_pretend_command_for_test, emerge_select, emerge_select_command_for_test,
-    run_emerge, run_emerge_chroot, EmergeLine, EmergeStream,
+    EmergeLine, EmergeStream, emerge_chroot_command_for_test, emerge_command_for_test,
+    emerge_depclean_pretend, emerge_depclean_pretend_command_for_test, emerge_deselect,
+    emerge_deselect_command_for_test, emerge_select, emerge_select_command_for_test, run_emerge,
+    run_emerge_chroot,
 };
 /// Error type returned by all `use_resolver` operations.
 pub use error::UseResolverError;
 /// Writes generated Portage configuration files.
 pub use generate::{
-    generate_make_conf, gpu_to_video_cards, should_enable_pgo, write_portage_config,
-    write_portage_plan_config, MakeConfOutput,
+    MakeConfOutput, generate_make_conf, gpu_to_video_cards, should_enable_pgo,
+    write_portage_config, write_portage_plan_config,
 };
 /// Extracts a `category/package` atom and version from an md5-cache file path.
 pub use path::package_from_md5_cache_path;
@@ -43,7 +43,7 @@ pub use types::{
 };
 /// Parses and plans guarded world updates from Portage pretend output.
 pub use update::{
-    build_world_update_plan, manifest_for_update_preflight, parse_pretend_world_update,
-    plan_update_preflight, PretendOperation, PretendPackage, PretendPackageSource,
-    PretendParseError, WorldUpdatePlan, WorldUpdateWarning,
+    PretendOperation, PretendPackage, PretendPackageSource, PretendParseError, WorldUpdatePlan,
+    WorldUpdateWarning, build_world_update_plan, manifest_for_update_preflight,
+    parse_pretend_world_update, plan_update_preflight,
 };

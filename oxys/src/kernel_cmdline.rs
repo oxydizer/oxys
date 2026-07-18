@@ -57,10 +57,7 @@ impl ResolvedKernelCmdline {
                 .map(|decision| {
                     format!(
                         "kernel merge: {}\n      source: {} ({})\n      reason: {}",
-                        decision.value,
-                        decision.source,
-                        decision.source_field,
-                        decision.reason
+                        decision.value, decision.source, decision.source_field, decision.reason
                     )
                 }),
         );

@@ -6,9 +6,9 @@
 
 use std::{fs, path::Path};
 
-use crate::manifest::{Disk, GB};
+use crate::manifest::{Disk, DiskLayout, GB, ResolvedSwap, SystemManifest};
 
-use super::{apply, DiskError};
+use super::{DiskError, apply};
 
 /// Floor for whole-disk installs. Desktop rsync of the live root routinely
 /// needs more than ~8 GiB (see AGENTS.md); refuse below this so wipe never
@@ -18,13 +18,21 @@ pub const MIN_INSTALL_BYTES: u64 = 12 * GB;
 /// Verify `disk.device` is a real, writable whole-disk candidate that is not
 /// currently mounted, swapped on, held by LVM/RAID/dm, or undersized.
 pub fn preflight(disk: &Disk) -> Result<(), DiskError> {
+    let manifest = SystemManifest {
+        disk: disk.clone(),
+        ..SystemManifest::default()
+    };
+    let resolved_swap = manifest.resolved_swap()?;
+    preflight_with_swap(disk, &resolved_swap)
+}
+
+pub fn preflight_with_swap(disk: &Disk, resolved_swap: &ResolvedSwap) -> Result<(), DiskError> {
     let device = disk.device.trim();
     if device.is_empty() {
         return Err(DiskError::MissingDevice);
     }
 
-    let metadata =
-        fs::metadata(device).map_err(|_| DiskError::DeviceMissing(device.to_owned()))?;
+    let metadata = fs::metadata(device).map_err(|_| DiskError::DeviceMissing(device.to_owned()))?;
 
     #[cfg(unix)]
     {
@@ -36,21 +44,19 @@ pub fn preflight(disk: &Disk) -> Result<(), DiskError> {
 
     let device_path = Path::new(device);
     let canonical_device = fs::canonicalize(device_path).unwrap_or_else(|_| device_path.into());
-    let sys_name = block_sysfs_name(&canonical_device).ok_or_else(|| {
-        DiskError::DeviceBusy {
-            device: device.to_owned(),
-            reason: format!(
-                "could not resolve {} to a /sys/block entry (is it a whole disk?)",
-                canonical_device.display()
-            ),
-        }
+    let sys_name = block_sysfs_name(&canonical_device).ok_or_else(|| DiskError::DeviceBusy {
+        device: device.to_owned(),
+        reason: format!(
+            "could not resolve {} to a /sys/block entry (is it a whole disk?)",
+            canonical_device.display()
+        ),
     })?;
 
     refuse_if_read_only(device, &sys_name)?;
     refuse_if_mounted(device, &canonical_device)?;
     refuse_if_swapped(device, &canonical_device)?;
     refuse_if_has_holders(device, &sys_name)?;
-    refuse_if_too_small(device, &sys_name)?;
+    refuse_if_too_small(device, &sys_name, disk, resolved_swap)?;
 
     Ok(())
 }
@@ -177,13 +183,25 @@ fn is_partition_sysfs_name(disk: &str, name: &str) -> bool {
     false
 }
 
-fn refuse_if_too_small(device: &str, sys_name: &str) -> Result<(), DiskError> {
+fn refuse_if_too_small(
+    device: &str,
+    sys_name: &str,
+    disk: &Disk,
+    resolved_swap: &ResolvedSwap,
+) -> Result<(), DiskError> {
     let size = read_block_size_bytes(sys_name).unwrap_or(0);
-    if size < MIN_INSTALL_BYTES {
+    let mut required = MIN_INSTALL_BYTES.saturating_add(disk.partitions.efi.size);
+    if let Some(swap) = &resolved_swap.disk {
+        required = required.saturating_add(swap.size);
+    }
+    if disk.layout == DiskLayout::Zfs {
+        required = required.saturating_add(disk.zfs.boot_pool_size);
+    }
+    if size < required {
         return Err(DiskError::DeviceTooSmall {
             device: device.to_owned(),
             have: format_bytes(size),
-            need: format_bytes(MIN_INSTALL_BYTES),
+            need: format_bytes(required),
         });
     }
     Ok(())

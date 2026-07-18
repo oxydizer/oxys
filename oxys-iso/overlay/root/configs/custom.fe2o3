@@ -1,13 +1,36 @@
 use oxys::prelude::*;
 
+#[oxys::config]
 pub fn config() -> Oxys {
+    let ram_gib = system_ram_gib();
+    let use_zram = ram_gib > 8;
     Oxys {
         os: Os {
             hostname: "OxysOS".into(),
-            timezone: "Europe/London".into(),
+            // Picked from the zoneinfo list by the installer at install time.
+            timezone: Timezone::Prompt,
             locale: "en_US.UTF-8".into(),
-            shell: Shell::Bash,
-            libc: Libc::Glibc,
+        },
+        swap: Swap {
+            strategy: match ram_gib {
+                0..=8 => SwapStrategy::Disk {
+                    size: SwapSize::MatchRam,
+                },
+                9..=16 => SwapStrategy::Hybrid {
+                    zram: ZramOptions {
+                        algorithm: Compression::Zstd,
+                        fraction: RamFraction::HALF,
+                    },
+                    disk: SwapDiskOptions {
+                        size: SwapSize::Fixed(4 * GIB),
+                    },
+                },
+                _ => SwapStrategy::ZramOnly {
+                    algorithm: Compression::Zstd,
+                    fraction: RamFraction::HALF,
+                },
+            },
+            swappiness: 180,
         },
         hardware: Hardware {
             graphics: detect_graphics(),
@@ -22,10 +45,14 @@ pub fn config() -> Oxys {
         // login behaviour explicit even though it includes desktop packages.
         session: Session {
             mode: SessionMode::Text,
-            ..Default::default()
         },
         prefer_binary: true,
         packages: vec![
+            // Keep the updater itself under Portage ownership so every update
+            // mode can bootstrap into the latest installation logic.
+            Package::new("app-admin/oxys"),
+            Package::new("sys-block/zram-init"),
+            Package::new("app-misc/fastfetch"),
             Package::new("gui-wm/niri").use_flags(vec!["screencast"]),
             Package::new("gui-shells/noctalia")
                 .binary(true)
@@ -39,11 +66,14 @@ pub fn config() -> Oxys {
             Package::new("sys-auth/seatd").use_flags(vec!["server"]),
         ],
         services: oxys::services! {
-            enabled: ["dbus", "seatd", "NetworkManager", "sshd"],
-            disabled: ["lvm2-monitor", "multipathd"],
+            openrc: {
+                sysinit: ["cgroups", "devfs", "dmesg", "kmod-static-nodes", "sysfs", "systemd-tmpfiles-setup-dev", "udev", "udev-trigger"],
+                boot: ["binfmt", "bootmisc", "fsck", "hostname", "hwclock", "keymaps", "localmount", "loopback", "modules", "mtab", "procfs", "root", "save-keymaps", "save-termencoding", "seedrng", "swap", "sysctl", "systemd-tmpfiles-setup", "termencoding"],
+                boot_if: [(use_zram, "zram-init")],
+                default: ["local", "netmount", "dbus", "seatd", "modemmanager", "NetworkManager", "sshd"],
+                nonetwork: ["local"],
+                shutdown: ["killprocs", "mount-ro", "savecache"],
+            },
         },
-        ..Default::default()
     }
 }
-
-oxys::main!(config);

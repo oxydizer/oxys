@@ -419,12 +419,8 @@ mod tests {
         };
         let session = manifest.resolved_session().unwrap();
         let mut graphics = resolve_graphics(&manifest).unwrap();
-        graphics
-            .requirements
-            .prime
-            .as_mut()
-            .unwrap()
-            .compositor_gpu = "/dev/dri/renderD128".to_owned();
+        graphics.requirements.prime.as_mut().unwrap().compositor_gpu =
+            "/dev/dri/renderD128".to_owned();
 
         let config = super::niri_config_contents(&session, &graphics);
         assert!(config.contains("debug {"));

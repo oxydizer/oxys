@@ -220,6 +220,7 @@ fn openrc_manifest_adds_symlink_service_activation() {
         services: crate::manifest::Services {
             enabled: vec!["NetworkManager".to_owned()],
             disabled: vec!["sshd".to_owned()],
+            ..Default::default()
         },
         ..SystemManifest::default()
     };
@@ -245,12 +246,21 @@ fn openrc_service_activation_manages_runlevel_symlinks() {
     let runlevel_dir = target.join("etc/runlevels/default");
     // A stale entry that should be removed by the disable pass.
     fs::create_dir_all(&runlevel_dir).unwrap();
+    fs::create_dir_all(target.join("etc/init.d")).unwrap();
+    fs::write(
+        target.join("etc/init.d/NetworkManager"),
+        "#!/sbin/openrc-run\n",
+    )
+    .unwrap();
     std::os::unix::fs::symlink("/etc/init.d/sshd", runlevel_dir.join("sshd")).unwrap();
 
     let manifest = SystemManifest {
         services: crate::manifest::Services {
-            enabled: vec!["NetworkManager".to_owned()],
-            disabled: vec!["sshd".to_owned()],
+            openrc: crate::manifest::OpenrcServices {
+                default: vec!["NetworkManager".to_owned()],
+                ..Default::default()
+            },
+            ..Default::default()
         },
         ..SystemManifest::default()
     };
@@ -264,6 +274,31 @@ fn openrc_service_activation_manages_runlevel_symlinks() {
         Path::new("/etc/init.d/NetworkManager")
     );
     assert!(fs::symlink_metadata(runlevel_dir.join("sshd")).is_err());
+}
+
+#[test]
+fn openrc_service_activation_validates_before_mutating_runlevels() {
+    let temp = TempTree::new("openrc-preflight");
+    let target = temp.path().join("target");
+    let runlevel_dir = target.join("etc/runlevels/default");
+    fs::create_dir_all(&runlevel_dir).unwrap();
+    std::os::unix::fs::symlink("/etc/init.d/stale", runlevel_dir.join("stale")).unwrap();
+
+    let manifest = SystemManifest {
+        services: crate::manifest::Services {
+            openrc: crate::manifest::OpenrcServices {
+                default: vec!["missing".to_owned()],
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..SystemManifest::default()
+    };
+
+    let (sender, _receiver) = mpsc::channel();
+    let error = services::activate_openrc_services(&manifest, &target, &sender).unwrap_err();
+    assert!(error.to_string().contains("missing"));
+    assert!(fs::symlink_metadata(runlevel_dir.join("stale")).is_ok());
 }
 
 #[test]
@@ -315,6 +350,7 @@ fn explicit_systemd_manifest_adds_service_activation_step() {
         services: crate::manifest::Services {
             enabled: vec!["systemd-networkd.service".to_owned()],
             disabled: vec!["sshd.service".to_owned()],
+            ..Default::default()
         },
         ..SystemManifest::default()
     };

@@ -81,7 +81,7 @@ The `os` block specifies high-level system parameters like hostname, locales, sh
 ---
 
 ## 2. Disk and Partitioning (`disk`)
-The `disk` block defines storage devices, filesystems, subvolumes, swap configurations, and volume management rules.
+The `disk` block defines storage devices, filesystems, subvolumes, and volume management rules. Swap policy is a top-level concern because it can combine disk storage with zram and VM tuning.
 
 * **Struct:** [Disk](oxys/src/manifest.rs#L124-L141)
 
@@ -91,7 +91,7 @@ The `disk` block defines storage devices, filesystems, subvolumes, swap configur
 | `layout` | [DiskLayout](oxys/src/manifest.rs#L728-L733) | `DiskLayout::Ext4` | Filesystem layout (`Btrfs`, `LuksBtrfs`, `Zfs`, `Ext4`). | 🟢 **Zfs / Ext4 Fully Implemented**<br>⚠️ **Btrfs / LuksBtrfs: Coming Soon** (modeled, but rejected by the executor for now) |
 | `encryption` | [Encryption](oxys/src/manifest.rs#L743-L750) | `Encryption::None` | Disk encryption strategy (`None`, `Password`, `Tpm`). | 🟢 **None: Fully Implemented**<br>⚠️ **Password / Tpm: Coming Soon** (modeled, but installer fails early if set, to prevent plain text leaks) |
 | `subvolumes` | `Vec<Subvolume>` | Standard subvolumes | Btrfs-style subvolumes or ZFS datasets. | 🟢 **Fully Implemented** (automatically maps `@` to datasets/mounts) |
-| `partitions` | [DiskPartitions](oxys/src/manifest.rs#L237-L242) | EFI (512MB) + Swap (zram) | Boot and swap partitions details. | 🟢 **Fully Implemented** |
+| `partitions` | [DiskPartitions](oxys/src/manifest/disk.rs) | EFI (512MiB) | Boot partition details. Legacy manifests may still declare swap here. | 🟢 **Fully Implemented** |
 | `snapshots` | `bool` | `true` | Enable automated system snapshots. | 🚧 **Coming Soon** (Parsed/validated but does not trigger snapshotting yet) |
 | `zfs` | [ZfsOptions](oxys/src/manifest.rs#L254-L269) | Standard ZFS defaults | Specific options for ZFS pool and datasets. | 🟢 **Fully Implemented** (when layout is ZFS) |
 | `ext4` | [Ext4Options](oxys/src/manifest.rs#L417-L422) | separate home + 50GB root | Specific options for Ext4 partitions. | 🟢 **Fully Implemented** (when layout is Ext4) |
@@ -111,11 +111,20 @@ Used to define Btrfs-style subvolumes. Defaults are:
 - **`efi`** ([EfiPartition](oxys/src/manifest.rs#L199-L204)):
   - `size`: `u64` (Default: `512 * MB` / `536870912` bytes)
   - `mount`: `String` (Default: `"/boot/efi"`)
-- **`swap`** ([SwapConfig](oxys/src/manifest.rs#L217-L228)):
-  - `Partition { size: u64 }`: Dedicated swap partition. 🟢 **Fully Implemented**
-  - `File { size: u64 }`: Swap file. 🚧 **Coming Soon** (Ignored by partition planner / fstab)
-  - `Zram { size: u64 }`: Compressed swap-in-RAM. 🚧 **Coming Soon** (Default layout fallback, but configuration on target not yet provisioned)
-  - `None`: No swap configured. 🟢 **Fully Implemented**
+`disk.partitions.swap` is retained as a compatibility input for older generated
+manifests. New configs use the top-level `swap` block below.
+
+## Swap policy (`swap`)
+
+`SwapStrategy` supports disk-only, zram-only, hybrid disk+zram, and disabled
+policies. Disk sizes can be fixed or match detected RAM; zram sizes use an
+exact `RamFraction`. Oxys writes disk swap to fstab with priority 10, configures
+OpenRC's `sys-block/zram-init` with priority 100, and writes
+`vm.swappiness = 180` under `/etc/sysctl.d`.
+
+The stock profiles select disk swap matching RAM through 8 GiB, hybrid zram
+plus a 4 GiB disk partition from 9–16 GiB, and zram-only above 16 GiB.
+Swapfiles remain unsupported and legacy swapfile declarations fail explicitly.
 
 ### ZFS Custom Configuration (`disk.zfs`)
 * **Struct:** [ZfsOptions](oxys/src/manifest.rs#L254-L269)

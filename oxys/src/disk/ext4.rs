@@ -1,24 +1,24 @@
 use std::path::Path;
 
-use crate::manifest::{Disk, SwapConfig};
+use crate::manifest::{Disk, ResolvedSwap};
 
 use super::apply::partition_path;
-use super::{mib, swap_partition_step, wipe_signatures_step, DiskError, DiskStep};
+use super::{DiskError, DiskStep, mib, swap_partition_step, wipe_signatures_step};
 
 pub(super) fn plan_swap_partition(
-    disk: &Disk,
+    resolved_swap: &ResolvedSwap,
     device: &str,
     steps: &mut Vec<DiskStep>,
     next_part: &mut usize,
 ) -> Option<String> {
-    match disk.partitions.swap {
-        SwapConfig::Partition { size } => {
+    match &resolved_swap.disk {
+        Some(swap) => {
             let number = *next_part;
             *next_part += 1;
-            steps.push(swap_partition_step(device, number, size));
+            steps.push(swap_partition_step(device, number, swap.size));
             Some(partition_path(device, number))
         }
-        SwapConfig::Zram { .. } | SwapConfig::None | SwapConfig::File { .. } => None,
+        None => None,
     }
 }
 

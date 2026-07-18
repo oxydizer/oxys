@@ -12,8 +12,8 @@ mod support;
 use support::fixture_repo::FixtureRepo;
 
 #[test]
-fn update_preflight_catches_toolchain_source_bump_affecting_binary_package(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn update_preflight_catches_toolchain_source_bump_affecting_binary_package()
+-> Result<(), Box<dyn std::error::Error>> {
     let fixture = FixtureRepo::new()
         .with_package_metadata("sys-devel/gcc-15.1.1", "IUSE=systemd\nKEYWORDS=amd64\n")
         .with_package_metadata(
@@ -82,8 +82,8 @@ fn clean_update_preflight_passes() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn update_dry_run_binary_reports_conflict_and_exits_nonzero(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn update_dry_run_binary_reports_conflict_and_exits_nonzero()
+-> Result<(), Box<dyn std::error::Error>> {
     let fixture = FixtureRepo::new()
         .with_package_metadata("sys-devel/gcc-15.1.1", "IUSE=systemd\nKEYWORDS=amd64\n")
         .with_package_metadata(
@@ -321,11 +321,17 @@ fn update_nothing_to_merge_exits_without_manifest() -> Result<(), Box<dyn std::e
     assert!(log.contains("PRETEND"), "{log}");
     assert!(!log.contains("REAL"), "{log}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("No world updates proposed by Portage"), "{stdout}");
+    assert!(
+        stdout.contains("No world updates proposed by Portage"),
+        "{stdout}"
+    );
     let reports = fs::read_dir(&report_dir)?.collect::<Result<Vec<_>, _>>()?;
     assert_eq!(reports.len(), 1);
     let report = fs::read_to_string(reports[0].path())?;
-    assert!(report.contains("real_update_status = \"no_updates\""), "{report}");
+    assert!(
+        report.contains("real_update_status = \"no_updates\""),
+        "{report}"
+    );
 
     Ok(())
 }
@@ -361,7 +367,10 @@ fn update_missing_manifest_fails_closed() -> Result<(), Box<dyn std::error::Erro
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(combined.contains("current oxys manifest not found"), "{combined}");
+    assert!(
+        combined.contains("current oxys manifest not found"),
+        "{combined}"
+    );
     assert!(combined.contains("--force"), "{combined}");
     let log = fs::read_to_string(emerge_log)?;
     assert!(log.contains("PRETEND"), "{log}");

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::{util::version_split_index, UseResolverError};
+use super::{UseResolverError, util::version_split_index};
 
 /// Derives the `category/package` atom and version from a Portage md5-cache file path.
 pub fn package_from_md5_cache_path(path: &Path) -> Result<(String, String), UseResolverError> {
