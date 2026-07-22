@@ -210,7 +210,7 @@ fn render_swap_size(size: &SwapSize) -> String {
 }
 
 fn human_size(bytes: u64) -> String {
-    if bytes >= GB && bytes % GB == 0 {
+    if bytes >= GB && bytes.is_multiple_of(GB) {
         format!("{} GiB", bytes / GB)
     } else if bytes >= MB {
         format!("{} MiB", bytes / MB)

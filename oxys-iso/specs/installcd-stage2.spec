@@ -50,8 +50,12 @@ portage_confdir: @PORTAGE_CONFDIR@
 
 # ---- live medium settings ----
 livecd/fstype: squashfs
-# Push the live root image toward size over build speed. Catalyst passes this
-# through to gensquashfs as `${clst_fsops}` when creating image.squashfs.
+# Keep the live root on XZ until the injected kernel's BMI2-optimized Zstandard
+# decoder is safe on x86-64-v3/KVM. CONFIG_SQUASHFS_ZSTD alone is not enough:
+# the 6.18.38-oxys decoder currently oopses in FSE_decompress_wksp_body_bmi2
+# while mounting a Zstandard image, after which dracut misleadingly reports
+# that it could not find image.squashfs. Catalyst passes these options through
+# to gensquashfs as `${clst_fsops}`.
 livecd/fsops: --compressor xz --block-size 1048576
 livecd/iso: oxysos-amd64-@TIMESTAMP@.iso
 livecd/volid: OxysOS-amd64-@DATESTAMP@
@@ -85,13 +89,19 @@ livecd/root_overlay: @OVERLAY_DIR@ @ZFS_OVERLAY@
 # It does the autologin + zfs-autoload wiring (see fsscript/fsscript.sh).
 livecd/fsscript: @REPO_DIR@/fsscript/fsscript.sh
 
-# Apply the OxysOS nodename during the boot runlevel, then start the live
-# networking stack. This is ISO-specific OpenRC wiring; it is separate from
-# whatever services the installed-system manifest enables later.
+# Apply the OxysOS nodename and expose the preserved Gentoo snapshot during the
+# boot runlevel, then start the live networking stack. This is ISO-specific
+# OpenRC wiring; it is separate from whatever services the installed-system
+# manifest enables later.
 # NetworkManager provides `nmtui` on the console for WiFi SSID/password entry.
 # Start ModemManager explicitly so its conf.d ordering and log redirection take
 # effect instead of letting D-Bus activate it with the graphical tty attached.
-livecd/rcadd: hostname|boot dbus|default modemmanager|default NetworkManager|default
+# The live installer needs D-Bus and NetworkManager, and starts ModemManager
+# explicitly so mobile-broadband probing cannot be D-Bus-activated later with
+# its output attached to tty1. Do not start nftables on the ephemeral live
+# medium: installed profiles independently reconcile authoritative OpenRC
+# runlevels and enable nftables on the target.
+livecd/rcadd: hostname|boot oxys-gentoo-repo|boot dbus|default modemmanager|default NetworkManager|default bluetooth|default
 
 # ---- kernel: oxys-build's own published kernel + zfs-kmod, injected by
 #      ../catalyst-overrides/kmerge.sh (zero compilation, zero emerge) ----
@@ -141,7 +151,6 @@ boot/kernel/oxys/dracut_args: --xz --no-hostonly -a dmsquash-live -o btrfs -o cr
 #
 # Only pure documentation is dropped below -- it never affects compilation.
 livecd/unmerge:
-	app-portage/gentoolkit
 	sys-apps/texinfo
 	sys-apps/man-db
 	sys-apps/man-pages

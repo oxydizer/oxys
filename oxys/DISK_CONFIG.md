@@ -158,13 +158,25 @@ Disk {
 }
 ```
 
-Password encryption should be implemented first with LUKS2:
+Password encryption is **not provisioned yet** (`plan_disk` rejects non-`None`).
+The full design lives in
+[`docs/INSTALLER_DUALBOOT_ENCRYPTION_PLAN.md`](../docs/INSTALLER_DUALBOOT_ENCRYPTION_PLAN.md)
+§6, refined against matrixOS’s working LUKS path. Summary for implementers:
 
-- create the normal root/data partition
-- run `cryptsetup luksFormat <partition>`
-- run `cryptsetup open <partition> oxys-root`
-- create ext4 or ZFS on `/dev/mapper/oxys-root`
-- generate matching `crypttab`, initramfs config, and systemd-boot kernel args
+1. **Validate first** — `cryptsetup` present, non-empty key source (password file or
+   session passphrase). Never a baked default passphrase in config.
+2. Create/select the root **partition**, then:
+   - `cryptsetup luksFormat --type luks2 <partition>` (key via `--key-file` or stdin)
+   - `cryptsetup open --allow-discards … <partition> oxys-root`
+   - settle udev; require `/dev/mapper/oxys-root`
+3. Keep two device identities (matrixOS pattern):
+   - **backing partition** → LUKS UUID → `rd.luks.uuid=` and crypttab
+   - **mapper** → ext4 UUID → `root=UUID=` and fstab
+4. `mkfs.ext4` + mount the **mapper**, never the raw LUKS node as `/`.
+5. Write `/etc/crypttab` (`oxys-root UUID=<luks-uuid> none luks,discard`) **and**
+   kernel cmdline; generate installed initramfs with dracut `--add crypt`.
+6. On failure: unmount target, `cryptsetup close` tracked mappers.
+7. When encryption is on: zram-only swap for v1; ext4 only; single root.
 
 TPM unlock can build on the same LUKS layout later with
 `systemd-cryptenroll --tpm2-device=auto`.

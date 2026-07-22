@@ -169,8 +169,14 @@ fn compile_config_file_in(
     fs::create_dir_all(&src_dir)
         .map_err(|err| CompileError::new(CompileStage::Scaffold, err.to_string()))?;
 
+    // default-features = false skips the oxys binary's clap/ratatui/crossterm
+    // stack — a config only needs the library. debug = false because nobody
+    // debugs the scaffold binary: it cuts compile time and shrinks the cached
+    // target dir (which the ISO ships pre-warmed in its squashfs).
     let cargo_toml = format!(
-        "[package]\nname = \"{SCAFFOLD_CRATE_NAME}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\noxys = {{ path = {oxys_crate_path:?} }}\n"
+        "[package]\nname = \"{SCAFFOLD_CRATE_NAME}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+         [dependencies]\noxys = {{ path = {oxys_crate_path:?}, default-features = false }}\n\n\
+         [profile.dev]\ndebug = false\n"
     );
     fs::write(build_dir.join("Cargo.toml"), cargo_toml)
         .map_err(|err| CompileError::new(CompileStage::Scaffold, err.to_string()))?;
@@ -179,6 +185,20 @@ fn compile_config_file_in(
 
     let manifest = fs::canonicalize(build_dir.join("Cargo.toml"))
         .map_err(|err| CompileError::new(CompileStage::Scaffold, err.to_string()))?;
+    let manifest_path = out_dir.join(LOCAL_MANIFEST);
+    match fs::remove_file(&manifest_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(CompileError::new(
+                CompileStage::Scaffold,
+                format!(
+                    "failed to remove stale {} before compilation: {err}",
+                    manifest_path.display()
+                ),
+            ));
+        }
+    }
     let run = Command::new("cargo")
         .arg("run")
         .arg("--manifest-path")
@@ -199,7 +219,6 @@ fn compile_config_file_in(
         );
     }
 
-    let manifest_path = out_dir.join(LOCAL_MANIFEST);
     if !manifest_path.exists() {
         return Err(CompileError::new(
             CompileStage::ManifestMissing,
@@ -333,6 +352,33 @@ oxys::main!(config);
         .expect_err("broken config should fail");
         assert_eq!(err.stage, CompileStage::CargoBuild);
         assert!(!err.output.is_empty(), "compiler output should be captured");
+    }
+
+    #[test]
+    fn successful_run_must_produce_a_fresh_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = write_config(tmp.path(), "fn main() {}\n");
+        let out = tempfile::tempdir().unwrap();
+        let build = tempfile::tempdir().unwrap();
+        let tree = tempfile::tempdir().unwrap();
+        let stale_manifest = out.path().join(LOCAL_MANIFEST);
+        fs::write(
+            &stale_manifest,
+            crate::manifest_to_toml(&SystemManifest::default()).unwrap(),
+        )
+        .unwrap();
+
+        let err = compile_config_file_in(
+            &config,
+            oxys_crate_dir().to_str().unwrap(),
+            out.path(),
+            build.path(),
+            tree.path(),
+        )
+        .expect_err("a stale manifest must not satisfy a successful config run");
+
+        assert_eq!(err.stage, CompileStage::ManifestMissing);
+        assert!(!stale_manifest.exists());
     }
 
     #[test]

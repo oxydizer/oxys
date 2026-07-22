@@ -19,7 +19,7 @@ pub(in crate::ui) fn draw_install(
     } else if progress >= 100 {
         status_line("✓", "installation complete".to_string(), SUCCESS, true)
     } else {
-        let spin = SPINNER[spinner_idx % SPINNER.len()];
+        let spin = ASCII_SPINNER[spinner_idx % ASCII_SPINNER.len()];
         status_line(spin, "installing system".to_string(), ACCENT, true)
     };
     frame.render_widget(Paragraph::new(status), chunks[1]);
@@ -64,16 +64,18 @@ pub(in crate::ui) fn draw_install(
     draw_focal_panel(frame, chunks[2], "log", ACCENT, body);
 }
 
-pub(in crate::ui) fn draw_done(frame: &mut Frame, area: Rect) {
+pub(in crate::ui) fn draw_done(
+    frame: &mut Frame,
+    area: Rect,
+    install_elapsed: Option<std::time::Duration>,
+) {
     let chunks = screen_chunks(area, 2, 6);
     frame.render_widget(Paragraph::new(section_header("step 7", "done")), chunks[0]);
+    let completed_message = install_elapsed
+        .map(|elapsed| format!("System installed in {}", format_install_elapsed(elapsed)))
+        .unwrap_or_else(|| "Installation complete".to_string());
     frame.render_widget(
-        Paragraph::new(status_line(
-            "✓",
-            "Installation complete".to_string(),
-            SUCCESS,
-            true,
-        )),
+        Paragraph::new(status_line("✓", completed_message, SUCCESS, true)),
         chunks[1],
     );
 

@@ -57,6 +57,20 @@ pub fn plan_system_install(
                 .to_owned(),
         ));
     }
+    // Resolve the exact glibc catalogue entry up front. This prevents a typo
+    // from surviving disk setup only to fail when locale-gen runs in chroot.
+    let locale = manifest.os.locale.trim().to_owned();
+    if !locale.is_empty()
+        && crate::locales::supported_locale_line(
+            &source_root.join("usr/share/i18n/SUPPORTED"),
+            &locale,
+        )
+        .is_none()
+    {
+        return Err(SystemInstallError::InvalidPlan(format!(
+            "unsupported locale {locale:?}: no matching entry in the source image /usr/share/i18n/SUPPORTED"
+        )));
+    }
     let authoritative_openrc = manifest
         .services
         .openrc
@@ -75,6 +89,10 @@ pub fn plan_system_install(
             "swap policy requires zram-init in services.openrc.boot".to_owned(),
         ));
     }
+    // Fail on an unloadable firewall policy before any destructive disk work:
+    // an enabled firewall must declare the nftables package and its OpenRC
+    // default-runlevel service, or the installed system boots unprotected.
+    manifest.validate_firewall()?;
     if authoritative_openrc && manifest.disk.layout == DiskLayout::Zfs {
         for required in ["zfs-import", "zfs-mount"] {
             if !manifest
@@ -170,6 +188,11 @@ pub fn plan_system_install(
         resolved_swap: resolved_swap.clone(),
         target_mount: target_mount.to_path_buf(),
     });
+    steps.push(SystemInstallStep::ConfigureFirewall {
+        description: "Configure target firewall policy".to_owned(),
+        manifest: manifest.clone(),
+        target_mount: target_mount.to_path_buf(),
+    });
     steps.push(SystemInstallStep::ResetMachineId {
         description: "Reset target machine-id".to_owned(),
         target_mount: target_mount.to_path_buf(),
@@ -183,6 +206,13 @@ pub fn plan_system_install(
         steps.push(SystemInstallStep::ConfigureTimezone {
             description: "Configure target timezone".to_owned(),
             timezone: timezone.clone(),
+            target_mount: target_mount.to_path_buf(),
+        });
+    }
+    if !locale.is_empty() {
+        steps.push(SystemInstallStep::ConfigureLocale {
+            description: "Configure target locale".to_owned(),
+            locale: locale.clone(),
             target_mount: target_mount.to_path_buf(),
         });
     }

@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+
+description="Expose the Gentoo repository preserved in the OxysOS live image"
+
+depend() {
+	need localmount
+}
+
+start() {
+	local repos=/var/db/repos
+	local snapshot=${repos}/.oxys-repositories/gentoo
+
+	ebegin "Activating the Gentoo repository snapshot"
+	if [ ! -d "${snapshot}/metadata/md5-cache/sys-apps" ] \
+		|| [ ! -s "${snapshot}/profiles/categories" ] \
+		|| [ ! -s "${snapshot}/profiles/repo_name" ] \
+		|| [ "$(cat "${snapshot}/profiles/repo_name")" != gentoo ]; then
+		eerror "Preserved Gentoo repository is missing or incomplete: ${snapshot}"
+		eend 1
+		return 1
+	fi
+
+	rm -rf "${repos}/gentoo"
+	ln -s .oxys-repositories/gentoo "${repos}/gentoo"
+	eend $?
+}

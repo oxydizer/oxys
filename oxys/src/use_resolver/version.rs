@@ -119,10 +119,10 @@ pub fn is_live_version(version: &str) -> bool {
 }
 
 pub fn parse_revision(value: &str) -> (&str, u64) {
-    if let Some((base, revision)) = value.rsplit_once("-r") {
-        if let Ok(revision) = revision.parse::<u64>() {
-            return (base, revision);
-        }
+    if let Some((base, revision)) = value.rsplit_once("-r")
+        && let Ok(revision) = revision.parse::<u64>()
+    {
+        return (base, revision);
     }
 
     (value, 0)

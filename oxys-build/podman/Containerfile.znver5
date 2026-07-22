@@ -1,4 +1,4 @@
-FROM docker.io/gentoo/stage3:amd64-systemd
+FROM docker.io/gentoo/stage3:amd64-openrc
 
 ENV OXYS_ARCH=znver5
 ENV OXYS_MARCH=znver5

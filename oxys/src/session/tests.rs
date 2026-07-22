@@ -181,6 +181,24 @@ fn materialization_merges_requirements_without_duplicates() {
     );
 }
 
+#[test]
+fn selected_terminal_is_materialized_as_a_session_requirement() {
+    let mut manifest = graphical_manifest();
+    manifest.session.terminal = Terminal::Kitty;
+
+    let resolved = manifest.resolved_session().unwrap();
+    assert_eq!(resolved.policy.terminal, Terminal::Kitty);
+    assert!(
+        resolved
+            .requirements
+            .packages
+            .contains(&"x11-terms/kitty".to_owned())
+    );
+
+    let materialized = resolved.materialize_manifest(&manifest);
+    assert!(has_package(&materialized, "x11-terms/kitty"));
+}
+
 fn test_root(name: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

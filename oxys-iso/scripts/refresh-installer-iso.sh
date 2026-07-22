@@ -19,6 +19,9 @@ Usage: $(basename "$0") [input.iso] [output.iso]
 Rebuild only oxys-installer and inject it, plus configs/*.fe2o3, into an
 existing OxysOS ISO. If input.iso is omitted, the newest ISO is selected from
 OXYS_ISO_DIR, ~/catalyst/builds/23.0-default, or the current directory.
+
+Set OXYS_SQUASHFS_COMPRESSION to gzip, lzo, lz4, xz, or zstd to recompress the
+live root instead of preserving the input ISO's compressor.
 EOF
 }
 
@@ -26,7 +29,7 @@ case "${1:-}" in
 	-h|--help) usage; exit 0 ;;
 esac
 
-for command in cargo xorriso unsquashfs mksquashfs sha256sum; do
+for command in bwrap cargo xorriso unsquashfs mksquashfs sha256sum; do
 	command -v "${command}" >/dev/null 2>&1 || {
 		echo "ERROR: required command not found: ${command}" >&2
 		exit 1
@@ -139,11 +142,131 @@ for config in base desktop custom; do
 		"${work}/root/root/configs/${config}.fe2o3"
 done
 
+# Older images shipped the GURU and Oxys ebuild trees without pregenerated
+# metadata. The installer plans from md5-cache rather than executing ebuilds,
+# so evaluate the required ebuilds with the Portage environment in the
+# extracted live root. Never copy dependency fields from /var/db/pkg: VDB
+# records expand := dependencies to built forms such as :0/10=, and those are
+# invalid in repository metadata (Portage masks the ebuild at install time).
+live_root="${work}/root"
+preserved_gentoo="${live_root}/var/db/repos/.oxys-repositories/gentoo"
+gentoo_link="${live_root}/var/db/repos/gentoo"
+if [[ ! -x ${live_root}/usr/bin/egencache ]]; then
+	echo "ERROR: extracted live root has no executable /usr/bin/egencache." >&2
+	exit 1
+fi
+if [[ ! -s ${preserved_gentoo}/profiles/repo_name ]] \
+	|| [[ "$(<"${preserved_gentoo}/profiles/repo_name")" != gentoo ]] \
+	|| [[ ! -d ${preserved_gentoo}/metadata/md5-cache/sys-apps ]]; then
+	echo "ERROR: refreshed live root has no complete preserved Gentoo repository." >&2
+	exit 1
+fi
+
+remove_gentoo_link=0
+if [[ -L ${gentoo_link} ]]; then
+	if [[ "$(realpath "${gentoo_link}")" != "$(realpath "${preserved_gentoo}")" ]]; then
+		echo "ERROR: ${gentoo_link} does not point at the preserved Gentoo repository." >&2
+		exit 1
+	fi
+elif [[ -e ${gentoo_link} ]]; then
+	echo "ERROR: ${gentoo_link} exists but is not the expected repository symlink." >&2
+	exit 1
+else
+	ln -s .oxys-repositories/gentoo "${gentoo_link}"
+	remove_gentoo_link=1
+fi
+
+# An unprivileged refresh already runs under fakeroot to preserve SquashFS
+# ownership. Bubblewrap supplies a real uid-0 user namespace for Portage;
+# clear fakeroot's preload before entering it. Override Portage's build user
+# only in this temporary config because the namespace maps uid/gid 0 alone.
+egencache_make_conf="${work}/egencache-make.conf"
+cp "${live_root}/etc/portage/make.conf" "${egencache_make_conf}"
+printf '%s\n' \
+	'PORTAGE_USERNAME="root"' \
+	'PORTAGE_GRPNAME="root"' \
+	'FEATURES="${FEATURES} -ipc-sandbox -network-sandbox -pid-sandbox -mount-sandbox -userpriv -usersandbox"' \
+	>> "${egencache_make_conf}"
+
+generate_overlay_cache() {
+	local repo=$1
+	shift
+	local atom category package cache_category
+
+	for atom in "$@"; do
+		category="${atom%/*}"
+		package="${atom#*/}"
+		cache_category="${live_root}/var/db/repos/${repo}/metadata/md5-cache/${category}"
+		if [[ -d ${cache_category} ]]; then
+			find "${cache_category}" -maxdepth 1 -type f -name "${package}-*" -delete
+		fi
+	done
+
+	if ! env -u LD_PRELOAD -u FAKEROOTKEY -u FAKEROOT_FD_BASE \
+		bwrap --die-with-parent --unshare-user --uid 0 --gid 0 \
+			--bind "${live_root}" / \
+			--ro-bind "${egencache_make_conf}" /etc/portage/make.conf \
+			--dev /dev --proc /proc --tmpfs /run --tmpfs /tmp \
+			--clearenv --setenv HOME /root \
+			--setenv PATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+			/usr/bin/egencache --update --repo="${repo}" --jobs=4 "$@"; then
+		echo "ERROR: failed to generate ${repo} metadata inside the live root." >&2
+		exit 1
+	fi
+}
+
+generate_overlay_cache guru \
+	gui-wm/niri \
+	gui-apps/xwayland-satellite \
+	gui-apps/wlsunset
+generate_overlay_cache oxys \
+	app-admin/oxys \
+	gui-shells/noctalia
+
+if (( remove_gentoo_link )); then
+	rm "${gentoo_link}"
+fi
+
+required_overlay_caches=(
+	"oxys/app-admin/oxys-"
+	"oxys/gui-shells/noctalia-"
+	"guru/gui-wm/niri-"
+	"guru/gui-apps/xwayland-satellite-"
+	"guru/gui-apps/wlsunset-"
+)
+for required in "${required_overlay_caches[@]}"; do
+	repo="${required%%/*}"
+	remainder="${required#*/}"
+	category="${remainder%%/*}"
+	prefix="${remainder#*/}"
+	cache_category="${live_root}/var/db/repos/${repo}/metadata/md5-cache/${category}"
+	mapfile -t cache_files < <(
+		find "${cache_category}" -maxdepth 1 -type f -name "${prefix}*" -print 2>/dev/null
+	)
+	if (( ${#cache_files[@]} == 0 )); then
+		echo "ERROR: refreshed live root has no metadata for ${repo}::${category}/${prefix%-}." >&2
+		exit 1
+	fi
+	# A slash between a slot and subslot followed by '=' is the VDB-only
+	# built slot-operator form which caused niri to be masked as invalid.
+	if grep -EH '^(BDEPEND|DEPEND|IDEPEND|PDEPEND|RDEPEND)=.*:[^[:space:]()/]+/[^[:space:]()]+=' \
+		"${cache_files[@]}"; then
+		echo "ERROR: ${repo}::${category}/${prefix%-} cache contains a built slot operator." >&2
+		exit 1
+	fi
+done
+chown -R 0:0 "${work}/root/var/db/repos"
+echo ">> verified installer metadata for GURU and Oxys overlay packages"
+
 squash_info="$(unsquashfs -s "${disk_squash_path}")"
 compression="$(awk '/^Compression / {print $2; exit}' <<<"${squash_info}")"
+compression="${OXYS_SQUASHFS_COMPRESSION:-${compression}}"
 case "${compression}" in
 	gzip|lzo|lz4|xz|zstd) ;;
-	*) compression=xz ;;
+	*)
+		echo "ERROR: unsupported SquashFS compressor: ${compression}" >&2
+		exit 1
+		;;
 esac
 block_size="$(awk '/^Block size / {print $3; exit}' <<<"${squash_info}")"
 [[ "${block_size}" =~ ^[0-9]+$ ]] || block_size=1048576

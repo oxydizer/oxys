@@ -446,49 +446,9 @@ fn update_force_threads_jobs_and_keep_going() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-#[test]
-fn malformed_pretend_output_fails_closed_in_binary() -> Result<(), Box<dyn std::error::Error>> {
-    let workdir = tempfile::TempDir::new()?;
-    let current_manifest_path = workdir.path().join("current-manifest.toml");
-    let emerge_log = workdir.path().join("emerge.log");
-    let emerge = write_fake_emerge(
-        workdir.path(),
-        &emerge_log,
-        "These are the packages that would be merged, in order:\n[ebuild U] ???\n",
-    )?;
-    fs::write(
-        &current_manifest_path,
-        manifest_to_toml(&SystemManifest::default())?,
-    )?;
-
-    let output = Command::new(env!("CARGO_BIN_EXE_oxys"))
-        .arg("update")
-        .current_dir(workdir.path())
-        .env("OXYS_EMERGE", &emerge)
-        .env("OXYS_SYSTEM_MANIFEST", &current_manifest_path)
-        .output()?;
-
-    assert!(
-        !output.status.success(),
-        "expected malformed pretend output to fail closed"
-    );
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        combined.contains("cannot verify emerge pretend output"),
-        "{combined}"
-    );
-    assert!(
-        combined.contains("Refusing to run emerge -uDN @world"),
-        "{combined}"
-    );
-    assert!(!fs::read_to_string(emerge_log)?.contains("REAL"));
-
-    Ok(())
-}
+// Malformed pretend parsing is unit-tested in use_resolver::update; binary
+// wiring for fail-closed update is covered by update_missing_manifest_fails_closed
+// and update_dry_run_binary_reports_conflict_and_exits_nonzero.
 
 fn write_fake_emerge(
     dir: &std::path::Path,

@@ -84,9 +84,9 @@ pub(super) fn run_app(
 
         terminal.draw(|frame| render(frame, &app))?;
 
-        if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press {
                     match handle_key_event(&mut app, key) {
                         LoopAction::Continue => {}
                         LoopAction::Quit => return Ok(AppExit::Quit),
@@ -103,8 +103,6 @@ pub(super) fn run_app(
                         }
                     }
                 }
-            }
-        }
     }
 }
 
@@ -172,8 +170,8 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> LoopAction {
                 password: app.password.clone(),
             };
         }
-        KeyCode::Char(ch) => {
-            if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT {
+        KeyCode::Char(ch)
+            if (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT) => {
                 match app.focus {
                     FocusField::Username => app.username.push(ch),
                     FocusField::Password => app.password.push(ch),
@@ -181,7 +179,6 @@ fn handle_key_event(app: &mut App, key: KeyEvent) -> LoopAction {
                 app.wrong_password = false;
                 app.status = None;
             }
-        }
         _ => {}
     }
 

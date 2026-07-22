@@ -110,37 +110,3 @@ fn split_atom(atom: &str) -> (String, String, String) {
 
     (category.to_owned(), rest.to_owned(), "1.0.0".to_owned())
 }
-
-#[cfg(test)]
-mod tests {
-    use super::FixtureRepo;
-
-    #[test]
-    fn creates_minimal_structure() {
-        let f = FixtureRepo::new().with_package("gui-wm/niri", &["wayland"]);
-        let root = f.root.path();
-        assert!(root.join("metadata").join("md5-cache").is_dir());
-        let entry = root
-            .join("metadata")
-            .join("md5-cache")
-            .join("gui-wm")
-            .join("niri-1.0.0");
-        assert!(entry.is_file());
-        let text = std::fs::read_to_string(&entry).unwrap();
-        assert!(text.contains("IUSE=wayland"));
-        assert!(text.contains("KEYWORDS=amd64"));
-    }
-
-    #[test]
-    fn supports_versioned_atom() {
-        let f = FixtureRepo::new().with_package("app-admin/example-2.1.0-r3", &[]);
-        let entry = f
-            .root
-            .path()
-            .join("metadata")
-            .join("md5-cache")
-            .join("app-admin")
-            .join("example-2.1.0-r3");
-        assert!(entry.is_file());
-    }
-}

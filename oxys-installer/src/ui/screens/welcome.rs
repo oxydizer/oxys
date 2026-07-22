@@ -39,6 +39,9 @@ pub(in crate::ui) fn draw_welcome(frame: &mut Frame, area: Rect, app: &App) {
         rows[2],
     );
 
+    // Toggle the caret in software: Linux VT/fbcon (live ISO on real hardware)
+    // ignores Modifier::SLOW_BLINK, so ANSI blink never fires there.
+    let caret = if app.blink_on() { "› " } else { "  " };
     let body = vec![
         Line::from(""),
         Line::from(""),
@@ -48,10 +51,8 @@ pub(in crate::ui) fn draw_welcome(frame: &mut Frame, area: Rect, app: &App) {
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "› ",
-                Style::default()
-                    .fg(ACCENT)
-                    .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK),
+                caret,
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 "Press ",

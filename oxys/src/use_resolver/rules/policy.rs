@@ -36,16 +36,12 @@ pub fn apply_wayland_x_rule(
     state: &mut PackageState,
     context: &ResolutionContext,
     global_use: &mut BTreeSet<String>,
-    warnings: &mut Vec<Warning>,
+    _warnings: &mut Vec<Warning>,
     decisions: &mut Vec<PortageDecision>,
 ) {
-    if !state.has_flag("wayland") || !state.has_flag("X") {
-        return;
-    }
-
     match context.display_preference {
         Preference::PreferFirst => {
-            if !state.is_explicit("wayland") {
+            if state.has_flag("wayland") && !state.is_explicit("wayland") {
                 state.set_flag("wayland", true);
                 decisions.push(package_decision(
                     state,
@@ -55,23 +51,21 @@ pub fn apply_wayland_x_rule(
                     "manifest display policy prefers wayland",
                 ));
             }
-            if !state.is_explicit("X") {
-                state.set_flag("X", false);
-                warnings.push(Warning {
-                    package: state.manifest.package.clone(),
-                    message: "resolved X vs wayland in favor of wayland".to_owned(),
+            if context.display_origin == PolicyOrigin::Manifest
+                && global_use.insert("wayland".to_owned())
+            {
+                decisions.push(PortageDecision {
+                    scope: DecisionScope::GlobalUse,
+                    package: None,
+                    subject: "wayland".to_owned(),
+                    action: DecisionAction::Enable,
+                    source: context.display_origin.decision_source(),
+                    reason: "manifest display policy prefers wayland".to_owned(),
                 });
-                decisions.push(package_decision(
-                    state,
-                    "X",
-                    DecisionAction::Disable,
-                    context.display_origin.decision_source(),
-                    "manifest display policy prefers wayland",
-                ));
             }
         }
         Preference::PreferSecond => {
-            if !state.is_explicit("X") {
+            if state.has_flag("X") && !state.is_explicit("X") {
                 state.set_flag("X", true);
                 decisions.push(package_decision(
                     state,
@@ -81,67 +75,20 @@ pub fn apply_wayland_x_rule(
                     "manifest display policy prefers X11",
                 ));
             }
-            if !state.is_explicit("wayland") {
-                state.set_flag("wayland", false);
-                warnings.push(Warning {
-                    package: state.manifest.package.clone(),
-                    message: "resolved X vs wayland in favor of X11".to_owned(),
+            if context.display_origin == PolicyOrigin::Manifest && global_use.insert("X".to_owned())
+            {
+                decisions.push(PortageDecision {
+                    scope: DecisionScope::GlobalUse,
+                    package: None,
+                    subject: "X".to_owned(),
+                    action: DecisionAction::Enable,
+                    source: context.display_origin.decision_source(),
+                    reason: "manifest display policy prefers X11".to_owned(),
                 });
-                decisions.push(package_decision(
-                    state,
-                    "wayland",
-                    DecisionAction::Disable,
-                    context.display_origin.decision_source(),
-                    "manifest display policy prefers X11",
-                ));
             }
         }
         Preference::Ambiguous => {}
-        Preference::Unspecified => {
-            let wayland_enabled = state.is_enabled("wayland");
-            let x_enabled = state.is_enabled("X");
-
-            if wayland_enabled
-                && x_enabled
-                && !state.is_explicit("wayland")
-                && !state.is_explicit("X")
-            {
-                state.set_flag("X", false);
-                warnings.push(Warning {
-                    package: state.manifest.package.clone(),
-                    message: "resolved X vs wayland by preferring wayland".to_owned(),
-                });
-                decisions.push(package_decision(
-                    state,
-                    "X",
-                    DecisionAction::Disable,
-                    DecisionSource::PackageInference,
-                    "fallback display inference prefers wayland when no manifest display policy exists",
-                ));
-            }
-        }
-    }
-
-    // Only force global `-X` when the manifest *explicitly* chose Wayland
-    // (`context.display_origin == PolicyOrigin::Manifest`). Bare-default
-    // configs resolve wayland/X per package via IUSE-default inference above
-    // and must not additionally strip X globally — Gentoo's official binhost
-    // ships desktop packages with X enabled alongside wayland, so disabling
-    // it globally here would silently push every bare-default install off
-    // the binhost and onto a from-source build for no explicit reason.
-    if context.display_origin == PolicyOrigin::Manifest
-        && state.is_enabled("wayland")
-        && !state.is_enabled("X")
-    {
-        global_use.insert("-X".to_owned());
-        decisions.push(PortageDecision {
-            scope: DecisionScope::GlobalUse,
-            package: None,
-            subject: "X".to_owned(),
-            action: DecisionAction::Disable,
-            source: context.display_origin.decision_source(),
-            reason: "manifest display policy prefers wayland".to_owned(),
-        });
+        Preference::Unspecified => {}
     }
 }
 
@@ -423,7 +370,7 @@ pub fn apply_audio_rule(
 pub fn apply_global_policy_rules(
     state: &mut PackageState,
     context: &ResolutionContext,
-    global_use: &mut BTreeSet<String>,
+    _global_use: &mut BTreeSet<String>,
     conflicts: &mut Vec<Conflict>,
     decisions: &mut Vec<PortageDecision>,
 ) {
@@ -460,7 +407,6 @@ pub fn apply_global_policy_rules(
                     value: "wayland",
                 };
                 force_flag(state, "wayland", true, &policy, conflicts, decisions);
-                force_flag(state, "X", false, &policy, conflicts, decisions);
             }
             Preference::PreferSecond | Preference::Ambiguous | Preference::Unspecified => {}
         }
@@ -479,16 +425,6 @@ pub fn apply_global_policy_rules(
             }
             Preference::PreferSecond | Preference::Ambiguous | Preference::Unspecified => {}
         }
-    }
-
-    if context.display_origin == PolicyOrigin::Manifest
-        && context.display_preference == Preference::PreferFirst
-        && state.has_flag("wayland")
-        && state.has_flag("X")
-        && state.is_enabled("wayland")
-        && !state.is_enabled("X")
-    {
-        global_use.insert("-X".to_owned());
     }
 }
 

@@ -20,7 +20,7 @@ fn get_grub_relative_path(
     path_in_chroot: &str,
 ) -> Result<String, SystemInstallError> {
     let target = target_mount.display().to_string();
-    let output = exec::capture_command("chroot", &[&target, "grub-mkrelpath", path_in_chroot])?;
+    let output = exec::capture_command("chroot", [&target, "grub-mkrelpath", path_in_chroot])?;
     if !output.status.success() {
         return Err(ExecError::StepFailed {
             step: format!("grub-mkrelpath {path_in_chroot}"),
@@ -39,7 +39,7 @@ fn get_grub_fs_uuid(
     let target = target_mount.display().to_string();
     let output = exec::capture_command(
         "chroot",
-        &[&target, "grub-probe", "--target=fs_uuid", path_in_chroot],
+        [&target, "grub-probe", "--target=fs_uuid", path_in_chroot],
     )?;
     if !output.status.success() {
         return Err(ExecError::StepFailed {
@@ -91,8 +91,8 @@ pub(super) fn derive_kernel_version(source_root: &Path) -> Result<String, System
                 ))
             })?
             .to_string_lossy();
-        if filename.starts_with("vmlinuz-") {
-            return Ok(filename["vmlinuz-".len()..].to_owned());
+        if let Some(version) = filename.strip_prefix("vmlinuz-") {
+            return Ok(version.to_owned());
         }
     }
 
@@ -101,10 +101,10 @@ pub(super) fn derive_kernel_version(source_root: &Path) -> Result<String, System
     if let Ok(entries) = fs::read_dir(&modules_dir) {
         let mut candidates = Vec::new();
         for entry in entries {
-            if let Ok(entry) = entry {
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    candidates.push(entry.file_name().to_string_lossy().into_owned());
-                }
+            if let Ok(entry) = entry
+                && entry.file_type().map(|t| t.is_dir()).unwrap_or(false)
+            {
+                candidates.push(entry.file_name().to_string_lossy().into_owned());
             }
         }
         candidates.sort();

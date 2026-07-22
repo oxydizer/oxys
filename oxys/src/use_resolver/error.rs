@@ -27,6 +27,10 @@ pub enum UseResolverError {
         /// is known (or the failure is about versions rather than spelling).
         suggestion_note: String,
     },
+    #[error(
+        "no stable amd64 version is available for package {package}; add a package-scoped ~amd64 or ** keyword override to opt in"
+    )]
+    NoStableVersion { package: String },
     #[error("missing required metadata field: {field}")]
     MissingField { field: &'static str },
     #[error("invalid metadata field {field}: {message}")]

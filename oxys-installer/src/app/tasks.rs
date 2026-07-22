@@ -8,7 +8,7 @@ use oxys::detect::detect_disks;
 
 use crate::{hardware, network, provisioning};
 
-use super::{App, CompileEvent, Screen, INSTALL_LOG_PATH};
+use super::{App, CompileEvent, INSTALL_LOG_PATH, Screen};
 
 impl App {
     /// Kicks off the one-shot startup connectivity probe (see [`network`])
@@ -68,6 +68,8 @@ impl App {
         // the QEMU serial console). Best-effort: never block the install on it.
         let _ = fs::write(INSTALL_LOG_PATH, b"");
         self.install_progress = 0;
+        self.install_started_at = Some(std::time::Instant::now());
+        self.install_elapsed = None;
         // Drop any finished worker handle; install_in_progress() is false so
         // this is not a live task we need to keep.
         let _ = self.install_task.take();
@@ -119,6 +121,8 @@ impl App {
         self.manifest_read_error = None;
         self.package_summary = None;
         self.compiling = true;
+        self.compile_progress = 5;
+        self.compile_started_at = Some(std::time::Instant::now());
         if let Some(handle) = self.compile_task.take() {
             handle.abort();
         }

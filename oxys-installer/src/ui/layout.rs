@@ -6,7 +6,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{App, Screen};
+use crate::app::{App, Screen, format_install_elapsed};
 
 use super::theme::{ACCENT, ACCENT_DIM, ASCII_SPINNER, BG, DIM, FAINT, FG, SUCCESS};
 
@@ -66,8 +66,20 @@ pub(super) fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         chunks[0],
     );
 
+    let right_status = match app.current {
+        Screen::Installing => app
+            .install_elapsed()
+            .map(|elapsed| format!("elapsed {}", format_install_elapsed(elapsed)))
+            .unwrap_or_else(|| "elapsed 00:00".to_string()),
+        Screen::Done => app
+            .install_elapsed()
+            .map(|elapsed| format!("installed in {}", format_install_elapsed(elapsed)))
+            .unwrap_or_else(|| "installation complete".to_string()),
+        _ => app.hardware_short.clone(),
+    };
+
     frame.render_widget(
-        Paragraph::new(app.hardware_short.as_str())
+        Paragraph::new(right_status)
             .style(Style::default().bg(BG).fg(DIM))
             .alignment(Alignment::Right),
         chunks[1],

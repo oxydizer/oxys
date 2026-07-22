@@ -55,6 +55,9 @@ impl fmt::Display for SystemInstallPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// A plan holds a few dozen steps at most, so the size skew from variants
+// carrying a SystemManifest is not worth the churn of boxing them.
+#[allow(clippy::large_enum_variant)]
 pub enum SystemInstallStep {
     ResolveSession {
         description: String,
@@ -84,6 +87,11 @@ pub enum SystemInstallStep {
         resolved_swap: ResolvedSwap,
         target_mount: PathBuf,
     },
+    ConfigureFirewall {
+        description: String,
+        manifest: SystemManifest,
+        target_mount: PathBuf,
+    },
     ResetMachineId {
         description: String,
         target_mount: PathBuf,
@@ -96,6 +104,11 @@ pub enum SystemInstallStep {
     ConfigureTimezone {
         description: String,
         timezone: String,
+        target_mount: PathBuf,
+    },
+    ConfigureLocale {
+        description: String,
+        locale: String,
         target_mount: PathBuf,
     },
     SetupUsers {
@@ -200,9 +213,11 @@ impl SystemInstallStep {
             | Self::Command { description, .. }
             | Self::GenerateFstab { description, .. }
             | Self::ConfigureSwap { description, .. }
+            | Self::ConfigureFirewall { description, .. }
             | Self::ResetMachineId { description, .. }
             | Self::ConfigureHostname { description, .. }
             | Self::ConfigureTimezone { description, .. }
+            | Self::ConfigureLocale { description, .. }
             | Self::SetupUsers { description, .. }
             | Self::InstallBootAssets { description, .. }
             | Self::GenerateSystemdBoot { description, .. }
@@ -243,6 +258,27 @@ impl SystemInstallStep {
                 resolved_swap.disk.is_some(),
                 resolved_swap.swappiness
             ),
+            Self::ConfigureFirewall {
+                manifest,
+                target_mount,
+                ..
+            } => {
+                if manifest.firewall.enabled() {
+                    format!(
+                        "render nftables policy to {} (validated, mode 0600)",
+                        target_mount
+                            .join(crate::runtime::NFTABLES_RULES_PATH)
+                            .display()
+                    )
+                } else {
+                    format!(
+                        "firewall disabled: remove any Oxys-generated {}",
+                        target_mount
+                            .join(crate::runtime::NFTABLES_RULES_PATH)
+                            .display()
+                    )
+                }
+            }
             Self::ResetMachineId { target_mount, .. } => {
                 format!("truncate {}", target_mount.join("etc/machine-id").display())
             }
@@ -261,6 +297,14 @@ impl SystemInstallStep {
             } => format!(
                 "link {} to zoneinfo {timezone}",
                 target_mount.join("etc/localtime").display()
+            ),
+            Self::ConfigureLocale {
+                locale,
+                target_mount,
+                ..
+            } => format!(
+                "generate locale {locale} and set it as LANG under {}",
+                target_mount.join("etc").display()
             ),
             // Deliberately omits any password material so secrets never reach
             // the rendered plan or install log.
@@ -418,6 +462,8 @@ pub enum SystemInstallError {
     InvalidPlan(String),
     #[error("target sanity check failed after copy: {0}")]
     TargetValidationFailed(String),
+    #[error("package installation failed: {0}")]
+    PackageInstall(String),
     #[error("install I/O failed: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -434,6 +480,8 @@ pub enum SystemInstallError {
     Runtime(#[from] RuntimeConfigError),
     #[error(transparent)]
     Swap(#[from] SwapResolveError),
+    #[error(transparent)]
+    Firewall(#[from] crate::manifest::FirewallValidationError),
 }
 
 mod planner;

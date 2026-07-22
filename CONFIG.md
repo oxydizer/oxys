@@ -57,6 +57,7 @@ pub struct SystemManifest {
     pub session: Session,
     pub prefer_binary: bool,
     pub services: Services,
+    pub firewall: Firewall,
     pub users: Vec<User>,
 }
 ```
@@ -74,7 +75,7 @@ The `os` block specifies high-level system parameters like hostname, locales, sh
 | :--- | :--- | :--- | :--- | :--- |
 | `hostname` | `String` | `""` | The system hostname. | 🟢 **Fully Implemented** (written to `/etc/hostname` and `/etc/conf.d/hostname`) |
 | `timezone` | [Timezone](oxys/src/manifest/settings.rs) | `""` | IANA timezone: `"Europe/London".into()`, or `Timezone::Prompt` to pick from a searchable zoneinfo list in the installer. Literal zones are validated against the source image before any disk work. | 🟢 **Fully Implemented** (written to `/etc/timezone`, symlinked as `/etc/localtime`) |
-| `locale` | `String` | `""` | System locale (e.g., `"en_US.UTF-8"`). | 🚧 **Coming Soon** (Parsed/validated but not written to `/etc/locale.gen`) |
+| `locale` | `String` | `""` | System locale (e.g., `"en_US.UTF-8"`). | ✅ Validated against glibc, generated, and set as target `LANG` |
 | `shell` | [Shell](oxys/src/manifest.rs#L714-L718) | `Shell::Bash` | Default system shell (`Bash`, `Zsh`, `Fish`). | 🚧 **Coming Soon** (Parsed/validated but not yet provisioned/configured) |
 | `libc` | [Libc](oxys/src/manifest.rs#L676-L678) | `Libc::Glibc` | The system C library (`Glibc`). | 🟢 **Fully Implemented** |
 
@@ -194,11 +195,14 @@ Pass a compiled, checksummed manifest to both image builders with
 manifest-derived and manually supplied values. The two explicit variables
 remain available as a lower-level override when no manifest is supplied.
 
-Mesa is excluded from binary-package reuse and its installed USE
-flags/artifacts are verified; requested DRM symbols are appended to the kernel
-configuration, checked after `olddefconfig`, and recorded in artifact
-metadata. This prevents an old cache entry or mismatched prebuilt kernel from
-weakening the contract.
+Mesa is served prebuilt from the binhost, built under the full
+`VIDEO_CARDS` policy (virgl included); `--binpkg-respect-use=y` rejects any
+binpkg whose `video_cards_*` flags don't match the image's policy (falling
+back to a source build), and its installed USE flags/artifacts are still
+verified; requested DRM symbols are appended to the kernel configuration,
+checked after `olddefconfig`, and recorded in artifact metadata. This
+prevents an old cache entry or mismatched prebuilt kernel from weakening the
+contract.
 
 The rendered install plan includes the graphics decisions and capability
 evidence before the first copy/mutation step. Missing capabilities stop
@@ -229,6 +233,7 @@ services, and groups into the effective install manifest.
 | `login` | `LoginFrontend::{Tty, OxysLogin}` | `OxysLogin { tty: 1, fallback_tty_login: true }` |
 | `compositor` | `Compositor` | `Niri` |
 | `desktop_shell` | `Option<DesktopShell>` | `None` |
+| `terminal` | `Terminal::{Foot, Alacritty, Kitty, Wezterm}` | `Foot` |
 | `seat` | `SeatBackend::{Auto, Seatd, Logind, Direct}` | `Auto` |
 | `session_tracker` | `SessionTracker::{Auto, Elogind, Systemd, Pam, None}` | `Auto` |
 
@@ -335,6 +340,46 @@ Declares enabled or disabled daemons for the init system.
 | :--- | :--- | :--- | :--- | :--- |
 | `enabled` | `Vec<String>` | `vec![]` | Services to enable (e.g., NetworkManager, sshd). | 🟢 **Fully Implemented** |
 | `disabled` | `Vec<String>` | `vec![]` | Services to disable. | 🟢 **Fully Implemented** |
+
+---
+
+## 8b. Firewall (`firewall`)
+Typed host firewall policy, rendered into a native nftables ruleset at
+`/var/lib/nftables/rules-save` (mode `0600`, validated with `nft -c -f` before
+replacement) and loaded at boot by Gentoo's OpenRC `nftables` service. The DSL
+is deliberately limited to chain policies and numeric ports — no free-form nft
+snippets. An enabled firewall requires `net-firewall/nftables` in `packages`
+and `"nftables"` in `services.openrc.default` (validated at compile/install
+time). `oxys apply` reloads the ruleset only after it validates.
+
+* **Enum:** [Firewall](oxys/src/manifest/firewall.rs)
+
+| Variant | Behaviour |
+| :--- | :--- |
+| `Disabled` | Default (keeps pre-firewall manifests unchanged). No files are generated; Oxys-generated rules from a previous apply are removed, hand-written ones are left alone. |
+| `Nftables { .. }` | Renders the policy below. Loopback, established/related traffic, and DHCPv4/DHCPv6 client replies are always accepted. |
+
+`Nftables` fields:
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `incoming` | `FirewallPolicy` | Input chain policy (`Accept` or `Drop`). Stock profiles use `Drop`. |
+| `forwarding` | `FirewallPolicy` | Forward chain policy. Stock profiles use `Drop`. |
+| `outgoing` | `FirewallPolicy` | Output chain policy. Stock profiles use `Accept`. |
+| `allow_icmp` | `bool` | Accept ICMPv4/ICMPv6. Keep `true`: IPv6 neighbour discovery and PMTU depend on ICMPv6. |
+| `tcp_ports` | `Vec<u16>` | TCP ports to accept from anywhere (e.g. `vec![22]` on the base profile for SSH). |
+| `udp_ports` | `Vec<u16>` | UDP ports to accept from anywhere. |
+
+```rust
+firewall: Firewall::Nftables {
+    incoming: FirewallPolicy::Drop,
+    forwarding: FirewallPolicy::Drop,
+    outgoing: FirewallPolicy::Accept,
+    allow_icmp: true,
+    tcp_ports: vec![],
+    udp_ports: vec![],
+},
+```
 
 ---
 

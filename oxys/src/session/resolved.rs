@@ -54,17 +54,16 @@ impl ResolvedSession {
                         .use_flags(["sound-server", "pipewire-alsa"]);
                 }
                 result.packages.push(package);
-            } else if atom == "media-video/pipewire" {
-                if let Some(package) = result
+            } else if atom == "media-video/pipewire"
+                && let Some(package) = result
                     .packages
                     .iter_mut()
                     .find(|p| package_matches(p, atom))
-                {
-                    for flag in ["sound-server", "pipewire-alsa"] {
-                        if !package.use_flags.iter().any(|existing| existing == flag) {
-                            package.use_flags.push(flag.to_owned());
-                            package.from_source = true;
-                        }
+            {
+                for flag in ["sound-server", "pipewire-alsa"] {
+                    if !package.use_flags.iter().any(|existing| existing == flag) {
+                        package.use_flags.push(flag.to_owned());
+                        package.from_source = true;
                     }
                 }
             }

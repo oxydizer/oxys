@@ -65,6 +65,41 @@ pub(super) fn explain_required_use_violation(
     }
 }
 
+/// Every USE flag whose effective value participates in an expression.
+///
+/// A package's md5-cache contains IUSE defaults but not the active Gentoo
+/// profile's USE_EXPAND defaults (for example LUA_SINGLE_TARGET and
+/// PYTHON_SINGLE_TARGET). Callers use this set to distinguish a contradiction
+/// fully specified by the manifest from one that Portage must finish resolving
+/// against the target profile.
+pub(super) fn referenced_required_use_flags(expr: &RequiredUseExpr) -> BTreeSet<String> {
+    let mut flags = BTreeSet::new();
+    collect_required_use_flags(expr, &mut flags);
+    flags
+}
+
+fn collect_required_use_flags(expr: &RequiredUseExpr, flags: &mut BTreeSet<String>) {
+    match expr {
+        RequiredUseExpr::Flag(flag) | RequiredUseExpr::Not(flag) => {
+            flags.insert(flag.clone());
+        }
+        RequiredUseExpr::AnyOf(items)
+        | RequiredUseExpr::ExactlyOne(items)
+        | RequiredUseExpr::AtMostOne(items)
+        | RequiredUseExpr::AllOf(items) => {
+            for item in items {
+                collect_required_use_flags(item, flags);
+            }
+        }
+        RequiredUseExpr::IfThen(flag, items) => {
+            flags.insert(flag.clone());
+            for item in items {
+                collect_required_use_flags(item, flags);
+            }
+        }
+    }
+}
+
 fn required_use_expr_matches(expr: &RequiredUseExpr, enabled_flags: &BTreeSet<String>) -> bool {
     match expr {
         RequiredUseExpr::Flag(flag) => enabled_flags.contains(flag),

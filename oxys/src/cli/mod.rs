@@ -6,3 +6,4 @@ pub(crate) mod output;
 pub(crate) mod package;
 pub(crate) mod update;
 mod update_report;
+pub(crate) mod welcome;

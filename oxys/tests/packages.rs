@@ -102,14 +102,33 @@ fn artifact_round_trip_is_verified_idempotent_and_removable() {
             .lines()
             .any(|line| line == "gui-apps/wl-clipboard")
     );
+    let hold_path = target.path().join("etc/portage/package.mask/oxys");
+    let hold = fs::read_to_string(&hold_path).unwrap();
+    assert!(
+        hold.starts_with('#'),
+        "hold fragment must begin with the managed-by-oxys header"
+    );
+    assert_eq!(
+        hold.lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+            .collect::<Vec<_>>(),
+        vec![format!(">{CATEGORY}/{PF}")],
+        "install must register exactly one version hold"
+    );
 
     let receipt = oxys::packages::receipt_path(target.path(), CATEGORY, PF);
     let original_receipt = fs::read(&receipt).unwrap();
+    let original_hold = fs::read(&hold_path).unwrap();
     oxys::packages::install(&artifact, target.path()).unwrap();
     assert_eq!(
         fs::read(&receipt).unwrap(),
         original_receipt,
         "reinstall must be idempotent"
+    );
+    assert_eq!(
+        fs::read(&hold_path).unwrap(),
+        original_hold,
+        "reinstall must not duplicate the version hold"
     );
 
     fs::write(target.path().join("usr/bin/wl-copy"), "locally modified\n").unwrap();
@@ -138,6 +157,131 @@ fn artifact_round_trip_is_verified_idempotent_and_removable() {
             .unwrap()
             .lines()
             .any(|line| line == "gui-apps/wl-clipboard")
+    );
+    assert!(
+        !hold_path.exists(),
+        "removing the last held package must drop the hold fragment"
+    );
+}
+
+#[test]
+fn install_preserves_pre_existing_hold_line() {
+    let reference = fixture_reference_root();
+    let output_dir = TempDir::new().unwrap();
+    let artifact = output_dir.path().join("wl-clipboard.oxys");
+    oxys::packages::build(reference.path(), "gui-apps/wl-clipboard", &artifact).unwrap();
+
+    let target = TempDir::new().unwrap();
+    let user_holds = format!(">{CATEGORY}/{PF}\n>app-misc/other-1.0\n");
+    write_file(
+        target.path(),
+        "etc/portage/package.mask/oxys",
+        user_holds.as_bytes(),
+        0o644,
+    );
+
+    oxys::packages::install(&artifact, target.path()).unwrap();
+    let receipt_path = oxys::packages::receipt_path(target.path(), CATEGORY, PF);
+    let receipt: toml::Value = toml::from_str(&fs::read_to_string(&receipt_path).unwrap()).unwrap();
+    assert_eq!(
+        receipt["hold_added"].as_bool(),
+        Some(false),
+        "a pre-existing hold line must stay user-owned"
+    );
+
+    oxys::packages::remove(target.path(), &format!("{CATEGORY}/{PF}")).unwrap();
+    assert_eq!(
+        fs::read_to_string(target.path().join("etc/portage/package.mask/oxys")).unwrap(),
+        user_holds,
+        "removal must not prune hold lines it did not add"
+    );
+}
+
+#[test]
+fn install_fails_early_when_package_mask_is_a_regular_file() {
+    let reference = fixture_reference_root();
+    let output_dir = TempDir::new().unwrap();
+    let artifact = output_dir.path().join("wl-clipboard.oxys");
+    oxys::packages::build(reference.path(), "gui-apps/wl-clipboard", &artifact).unwrap();
+
+    let target = TempDir::new().unwrap();
+    write_file(
+        target.path(),
+        "etc/portage/package.mask",
+        b">app-misc/user-managed-1.0\n",
+        0o644,
+    );
+
+    let error = oxys::packages::install(&artifact, target.path()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("etc/portage/package.mask exists but is not a directory"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        !target.path().join("usr/bin/wl-copy").exists(),
+        "preflight must fail before any payload is written"
+    );
+    assert!(!oxys::packages::receipt_path(target.path(), CATEGORY, PF).exists());
+    assert!(!target.path().join("var/lib/oxys/transactions").exists());
+    assert!(!target.path().join("var/cache/oxys").exists());
+}
+
+#[test]
+fn remove_fails_early_when_package_mask_became_a_regular_file() {
+    let reference = fixture_reference_root();
+    let output_dir = TempDir::new().unwrap();
+    let artifact = output_dir.path().join("wl-clipboard.oxys");
+    oxys::packages::build(reference.path(), "gui-apps/wl-clipboard", &artifact).unwrap();
+    let target = TempDir::new().unwrap();
+    oxys::packages::install(&artifact, target.path()).unwrap();
+
+    let mask_dir = target.path().join("etc/portage/package.mask");
+    fs::remove_dir_all(&mask_dir).unwrap();
+    fs::write(&mask_dir, b">app-misc/user-managed-1.0\n").unwrap();
+
+    let error = oxys::packages::remove(target.path(), &format!("{CATEGORY}/{PF}")).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("etc/portage/package.mask exists but is not a directory"),
+        "unexpected error: {error}"
+    );
+    assert!(
+        target.path().join("usr/bin/wl-copy").exists(),
+        "preflight must fail before any payload deletion"
+    );
+    assert!(oxys::packages::receipt_path(target.path(), CATEGORY, PF).exists());
+}
+
+#[test]
+fn remove_handles_receipts_without_hold_field() {
+    let reference = fixture_reference_root();
+    let output_dir = TempDir::new().unwrap();
+    let artifact = output_dir.path().join("wl-clipboard.oxys");
+    oxys::packages::build(reference.path(), "gui-apps/wl-clipboard", &artifact).unwrap();
+    let target = TempDir::new().unwrap();
+    oxys::packages::install(&artifact, target.path()).unwrap();
+
+    // Simulate a receipt written before the hold feature existed.
+    let receipt_path = oxys::packages::receipt_path(target.path(), CATEGORY, PF);
+    let stripped = fs::read_to_string(&receipt_path)
+        .unwrap()
+        .lines()
+        .filter(|line| !line.starts_with("hold_added"))
+        .map(|line| format!("{line}\n"))
+        .collect::<String>();
+    fs::write(&receipt_path, stripped).unwrap();
+
+    oxys::packages::remove(target.path(), &format!("{CATEGORY}/{PF}")).unwrap();
+    assert!(!receipt_path.exists());
+    assert!(
+        fs::read_to_string(target.path().join("etc/portage/package.mask/oxys"))
+            .unwrap()
+            .lines()
+            .any(|line| line == format!(">{CATEGORY}/{PF}")),
+        "a pre-feature receipt must leave the hold fragment untouched"
     );
 }
 
@@ -204,7 +348,7 @@ fn interrupted_removal_is_resumable_from_journal() {
     let receipt_path = oxys::packages::receipt_path(target.path(), CATEGORY, PF);
     let receipt: toml::Value = toml::from_str(&fs::read_to_string(receipt_path).unwrap()).unwrap();
     let journal = format!(
-        "operation = \"remove\"\npackage = {:?}\nartifact = {:?}\nphase = \"removing\"\nstarted_at = \"2026-01-01T00:00:00Z\"\nworld_added = true\n",
+        "operation = \"remove\"\npackage = {:?}\nartifact = {:?}\nphase = \"removing\"\nstarted_at = \"2026-01-01T00:00:00Z\"\nworld_added = true\nhold_added = true\n",
         receipt["package"].as_str().unwrap(),
         receipt["artifact"].as_str().unwrap(),
     );
@@ -223,6 +367,10 @@ fn interrupted_removal_is_resumable_from_journal() {
             .path()
             .join(format!("var/db/pkg/{CATEGORY}/{PF}"))
             .exists()
+    );
+    assert!(
+        !target.path().join("etc/portage/package.mask/oxys").exists(),
+        "resumed removal must prune the version hold"
     );
 
     // Simulate a crash after the receipt commit but before the final journal
@@ -255,7 +403,7 @@ fn interrupted_install_with_partial_vdb_is_resumable_from_journal() {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     let journal = format!(
-        "operation = \"install\"\npackage = \"gentoo/gui-apps/wl-clipboard@2.2.1#0:0\"\nartifact = \"sha256:{digest}\"\nphase = \"installing\"\nstarted_at = \"2026-01-01T00:00:00Z\"\nworld_added = false\n"
+        "operation = \"install\"\npackage = \"gentoo/gui-apps/wl-clipboard@2.2.1#0:0\"\nartifact = \"sha256:{digest}\"\nphase = \"installing\"\nstarted_at = \"2026-01-01T00:00:00Z\"\nworld_added = false\nhold_added = false\n"
     );
     write_file(
         target.path(),
@@ -271,7 +419,19 @@ fn interrupted_install_with_partial_vdb_is_resumable_from_journal() {
             .join(format!("var/db/pkg/{CATEGORY}/{PF}/CONTENTS"))
             .exists()
     );
-    assert!(oxys::packages::receipt_path(target.path(), CATEGORY, PF).exists());
+    let receipt_path = oxys::packages::receipt_path(target.path(), CATEGORY, PF);
+    let receipt: toml::Value = toml::from_str(&fs::read_to_string(&receipt_path).unwrap()).unwrap();
+    assert_eq!(
+        receipt["hold_added"].as_bool(),
+        Some(true),
+        "a resumed install must still register and record the version hold"
+    );
+    assert!(
+        fs::read_to_string(target.path().join("etc/portage/package.mask/oxys"))
+            .unwrap()
+            .lines()
+            .any(|line| line == format!(">{CATEGORY}/{PF}"))
+    );
 }
 
 #[test]

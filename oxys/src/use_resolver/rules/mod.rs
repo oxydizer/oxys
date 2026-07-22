@@ -28,4 +28,6 @@ pub use metadata::{
     collect_keyword_acceptance, collect_license_acceptance, collect_local_conflicts,
     collect_metadata_warnings,
 };
-use required_use::{explain_required_use_violation, render_required_use_expr};
+use required_use::{
+    explain_required_use_violation, referenced_required_use_flags, render_required_use_expr,
+};

@@ -21,7 +21,13 @@ pub enum EmergeLine {
         line: String,
     },
     /// A package build has completed.
-    BuildComplete { package: String },
+    BuildComplete {
+        package: String,
+        /// Number of packages that have actually completed in this emerge run.
+        completed: u32,
+        /// Total merge operations reported by Portage's `(N of total)` marker.
+        total: Option<u32>,
+    },
     /// Fetching of package sources has started.
     FetchStart { package: String },
     /// Fetching of package sources has completed.
@@ -75,6 +81,13 @@ pub fn run_emerge(
 }
 
 /// Starts `emerge` inside a target chroot and returns a streaming handle.
+///
+/// Runs with `--update --changed-use`, so packages the target already has at
+/// the requested version with unchanged effective USE are skipped rather than
+/// unconditionally re-emerged (the target root is rsync'd from the live image,
+/// so most manifest packages are already installed). Skipped packages are NOT
+/// recorded in @world by emerge — callers that need world registration must
+/// follow up with [`emerge_select`].
 pub fn run_emerge_chroot(
     packages: &[String],
     target: &Path,
@@ -90,6 +103,8 @@ pub fn run_emerge_chroot(
         .arg("emerge")
         .arg("--root")
         .arg("/")
+        .arg("--update")
+        .arg("--changed-use")
         .arg("--jobs")
         .arg(jobs.to_string());
     if use_binpkgs {
@@ -263,10 +278,15 @@ struct ParserState {
     failed_package: Option<String>,
     last_error_message: Option<String>,
     fetch_package: Option<String>,
+    planned_total: Option<u32>,
+    completed_packages: u32,
 }
 
 fn parse_emerge_line(line: &str, state: &mut ParserState) -> EmergeLine {
     if let Some(package) = parse_prefixed_package(line, ">>> Emerging") {
+        if let Some((_, total)) = parse_emerge_position(line) {
+            state.planned_total = Some(total);
+        }
         state.current_package = Some(package.clone());
         return EmergeLine::BuildStart { package };
     }
@@ -276,26 +296,35 @@ fn parse_emerge_line(line: &str, state: &mut ParserState) -> EmergeLine {
         return EmergeLine::FetchStart { package };
     }
 
-    if line.starts_with(">>> Downloading") {
-        if let Some(package) = state.current_package.clone() {
-            state.fetch_package = Some(package.clone());
-            return EmergeLine::FetchStart { package };
-        }
+    if line.starts_with(">>> Downloading")
+        && let Some(package) = state.current_package.clone()
+    {
+        state.fetch_package = Some(package.clone());
+        return EmergeLine::FetchStart { package };
     }
 
     if let Some(package) = parse_prefixed_package(line, ">>> Completed installing") {
         state.current_package = Some(package.clone());
-        return EmergeLine::BuildComplete { package };
+        state.completed_packages = state.completed_packages.saturating_add(1);
+        let completed = state
+            .planned_total
+            .map_or(state.completed_packages, |total| {
+                state.completed_packages.min(total)
+            });
+        return EmergeLine::BuildComplete {
+            package,
+            completed,
+            total: state.planned_total,
+        };
     }
 
-    if line.starts_with(">>> Fetch completed") || line.starts_with(">>> Checking") {
-        if let Some(package) = state
+    if (line.starts_with(">>> Fetch completed") || line.starts_with(">>> Checking"))
+        && let Some(package) = state
             .fetch_package
             .clone()
             .or_else(|| state.current_package.clone())
-        {
-            return EmergeLine::FetchComplete { package };
-        }
+    {
+        return EmergeLine::FetchComplete { package };
     }
 
     if is_error_line(line) {
@@ -316,6 +345,26 @@ fn parse_emerge_line(line: &str, state: &mut ParserState) -> EmergeLine {
     }
 }
 
+/// Parse Portage's merge-position marker, e.g. `(12 of 133)`.
+///
+/// The completion counter is still driven by `>>> Completed installing`; the
+/// position marker supplies only the denominator because parallel jobs can
+/// start out of completion order.
+fn parse_emerge_position(line: &str) -> Option<(u32, u32)> {
+    let start = line.find('(')? + 1;
+    let end = line[start..].find(')')? + start;
+    let mut fields = line[start..end].split_whitespace();
+    let current = fields.next()?.parse::<u32>().ok()?;
+    if fields.next()? != "of" {
+        return None;
+    }
+    let total = fields.next()?.parse::<u32>().ok()?;
+    if fields.next().is_some() || current == 0 || total == 0 || current > total {
+        return None;
+    }
+    Some((current, total))
+}
+
 fn parse_prefixed_package(line: &str, prefix: &str) -> Option<String> {
     if !line.starts_with(prefix) {
         return None;
@@ -325,8 +374,7 @@ fn parse_prefixed_package(line: &str, prefix: &str) -> Option<String> {
 }
 
 fn parse_package_token(line: &str) -> Option<String> {
-    line.split_whitespace()
-        .find_map(|token| normalize_package_token(token))
+    line.split_whitespace().find_map(normalize_package_token)
 }
 
 fn normalize_package_token(token: &str) -> Option<String> {
@@ -411,6 +459,8 @@ pub fn emerge_chroot_command_for_test(
         "emerge".to_string(),
         "--root".to_string(),
         "/".to_string(),
+        "--update".to_string(),
+        "--changed-use".to_string(),
         "--jobs".to_string(),
         jobs.to_string(),
     ];

@@ -166,10 +166,42 @@ livecd/packages:
 	net-wireless/iw
 	net-misc/dhcpcd
 
+	# --- Bluetooth userspace: bluetoothd, bluetoothctl, D-Bus policy, and
+	#     the OpenRC bluetooth service. The kernel supplies BT_HCIBTUSB, but
+	#     controllers and peripherals are unusable without BlueZ. PipeWire's
+	#     matching Bluetooth audio plugin is enabled in package.use/desktop. ---
+	net-wireless/bluez
+
+	# --- core timekeeping, logging, and scheduled maintenance. chrony keeps
+	#     TLS/package operations on a trustworthy clock; sysklogd persists
+	#     kernel and daemon output; logrotate bounds those logs; and cronie
+	#     runs recurring maintenance such as rotation. KEEP IN SYNC with the
+	#     stock profiles in oxys-installer/configs. ---
+	net-misc/chrony
+	app-admin/sysklogd
+	app-admin/logrotate
+	sys-process/cronie
+
+	# --- firewall: native nftables is staged for the installed system but is
+	#     not started on the ephemeral live medium. The manifest's typed
+	#     Firewall renders /var/lib/nftables/rules-save; Gentoo's OpenRC
+	#     nftables service loads it on target boot. The seed ruleset + the
+	#     SAVE_ON_STOP="no" conf.d policy ship via the root overlay.
+	#     KEEP IN SYNC with the stock profiles in oxys-installer/configs. ---
+	net-firewall/nftables
+
 	# --- firmware: mandatory for real live-install hardware. Intel iwlwifi,
 	#     Realtek, Broadcom, MediaTek, storage, GPU, and many USB adapters need
-	#     blobs even when the kernel driver itself is present. ---
+	#     blobs even when the kernel driver itself is present. linux-firmware
+	#     carries AMD CPU microcode, but Intel CPU microcode is packaged
+	#     separately. Keep both in the live root so dracut can embed early
+	#     microcode and the rsync'd target retains the update payloads.
+	#     iucode_tool is only a BDEPEND of intel-microcode in this configuration,
+	#     so list it explicitly or Catalyst removes it before the target install
+	#     later needs to rebuild intel-microcode. ---
 	sys-kernel/linux-firmware
+	sys-apps/iucode_tool
+	sys-firmware/intel-microcode
 
 	# --- installer-invoked host tools (the installer shells out to these from
 	#     the LIVE env). rsync copies the live system onto the target;
@@ -179,6 +211,16 @@ livecd/packages:
 	#     drop them. ---
 	net-misc/rsync
 	app-editors/nano
+
+	# --- target build toolchain contract: the oxys-generated target
+	#     make.conf defaults to LDFLAGS="-fuse-ld=mold" and FEATURES="ccache"
+	#     (oxys/src/manifest/compiler.rs). The target root is rsync'd from
+	#     this live root, so both tools must ship here or every on-target
+	#     source build dies in configure with "C compiler cannot create
+	#     executables" (collect2: cannot find 'ld'). KEEP IN SYNC with the
+	#     compiler defaults and the fsscript guard. ---
+	sys-devel/mold
+	dev-util/ccache
 
 	# --- EFI bootloader extras: the installer uses `grub-install --removable`
 	#     (fallback \EFI\BOOT path, no NVRAM) so efibootmgr is not strictly
@@ -226,6 +268,10 @@ livecd/packages:
 	x11-misc/xdg-user-dirs
 	sys-fs/udisks
 	gnome-base/gvfs
+	# graphical file manager; the v3 binhost variant includes udisks support
+	xfce-base/thunar
+	# Thunar's removable-drive/media auto-management extension
+	xfce-base/thunar-volman
 	# terminals + wayland tools
 	gui-apps/foot
 	gui-apps/wl-clipboard
@@ -238,7 +284,7 @@ livecd/packages:
 	# fonts + icon theme
 	media-fonts/noto
 	media-fonts/noto-emoji
-	x11-themes/papirus-icon-theme
+	x11-themes/adwaita-icon-theme
 
 # NOTE on ZFS: userspace tools + kmod are NOT merged here. There is no kernel
 # in stage1, so zfs-kmod (USE=dist-kernel) cannot build yet. ZFS is added in

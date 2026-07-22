@@ -34,13 +34,28 @@ fn compile_cwd() -> Result<()> {
         "{}",
         "Executing project binary to generate manifest.toml...".cyan()
     );
+    let manifest_path = cwd.join(LOCAL_MANIFEST);
+    match std::fs::remove_file(&manifest_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(io::Error::new(
+                err.kind(),
+                format!(
+                    "failed to remove stale {} before execution: {err}",
+                    manifest_path.display()
+                ),
+            )
+            .into());
+        }
+    }
     let run = Command::new("cargo").arg("run").arg("--quiet").output()?;
     if !run.status.success() {
         eprintln!("{}", "Compiled binary execution failed".red().bold());
         print_command_output(&run.stdout, &run.stderr);
         return Err(io::Error::other("project execution failed").into());
     }
-    report_manifest(&cwd.join(LOCAL_MANIFEST))
+    report_manifest(&manifest_path)
 }
 
 fn compile_file(file: &Path) -> Result<()> {

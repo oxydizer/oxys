@@ -102,29 +102,43 @@ mod tests {
     }
 
     #[test]
-    fn from_source_overrides_prefer_binary() {
-        let pkg = Package::new("media-video/ffmpeg").from_source();
-        // Even with the global binary default on, an explicit from_source wins.
-        assert_eq!(classify(&pkg, true), PackageSource::Source);
-    }
-
-    #[test]
-    fn bin_atom_is_binary_by_convention() {
-        let pkg = Package::new("gui-wm/niri-bin");
-        assert_eq!(classify(&pkg, false), PackageSource::Binary);
-    }
-
-    #[test]
-    fn plain_package_defaults_to_source_without_prefer_binary() {
-        let pkg = Package::new("app-editors/vim");
-        assert_eq!(classify(&pkg, false), PackageSource::Source);
-        assert_eq!(classify(&pkg, true), PackageSource::Binary);
-    }
-
-    #[test]
-    fn explicit_binary_flag_wins_without_global_default() {
-        let pkg = Package::new("www-client/firefox").binary(true);
-        assert_eq!(classify(&pkg, false), PackageSource::Binary);
+    fn classify_respects_binary_source_rules() {
+        // (package, prefer_binary, expected source)
+        let cases = [
+            (
+                Package::new("media-video/ffmpeg").from_source(),
+                true,
+                PackageSource::Source,
+            ),
+            (
+                Package::new("gui-wm/niri-bin"),
+                false,
+                PackageSource::Binary,
+            ),
+            (
+                Package::new("app-editors/vim"),
+                false,
+                PackageSource::Source,
+            ),
+            (
+                Package::new("app-editors/vim"),
+                true,
+                PackageSource::Binary,
+            ),
+            (
+                Package::new("www-client/firefox").binary(true),
+                false,
+                PackageSource::Binary,
+            ),
+        ];
+        for (pkg, prefer_binary, expected) in cases {
+            assert_eq!(
+                classify(&pkg, prefer_binary),
+                expected,
+                "classify({:?}, prefer_binary={prefer_binary})",
+                pkg.package
+            );
+        }
     }
 
     #[test]

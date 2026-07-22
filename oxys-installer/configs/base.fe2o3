@@ -2,8 +2,7 @@ use oxys::prelude::*;
 
 #[oxys::config]
 pub fn config() -> Oxys {
-    let ram_gib = system_ram_gib();
-    let use_zram = ram_gib > 8;
+    let use_zram = system_ram_gib() > 8;
     Oxys {
         os: Os {
             hostname: "OxysOS".into(),
@@ -20,25 +19,8 @@ pub fn config() -> Oxys {
             },
         },
         swap: Swap {
-            strategy: match ram_gib {
-                0..=8 => SwapStrategy::Disk {
-                    size: SwapSize::MatchRam,
-                },
-                9..=16 => SwapStrategy::Hybrid {
-                    zram: ZramOptions {
-                        algorithm: Compression::Zstd,
-                        fraction: RamFraction::HALF,
-                    },
-                    disk: SwapDiskOptions {
-                        size: SwapSize::Fixed(4 * GIB),
-                    },
-                },
-                _ => SwapStrategy::ZramOnly {
-                    algorithm: Compression::Zstd,
-                    fraction: RamFraction::HALF,
-                },
-            },
             swappiness: 180,
+            ..Swap::auto()
         },
         hardware: Hardware {
             graphics: detect_graphics(),
@@ -53,27 +35,63 @@ pub fn config() -> Oxys {
             mode: SessionMode::Text,
         },
         prefer_binary: true,
+        // Locked-down native nftables firewall: drop unsolicited incoming and
+        // forwarded traffic, allow everything outgoing. Loopback, established/
+        // related, ICMP/ICMPv6, and DHCP client replies are always accepted.
+        // Base is the headless/server profile, so SSH (TCP 22) stays open to
+        // match the sshd service below.
+        firewall: Firewall::Nftables {
+            incoming: FirewallPolicy::Drop,
+            forwarding: FirewallPolicy::Drop,
+            outgoing: FirewallPolicy::Accept,
+            allow_icmp: true,
+            tcp_ports: vec![22],
+            udp_ports: vec![],
+        },
+        // Portage policy: stable amd64 globally (ACCEPT_KEYWORDS="amd64").
+        // Keep testing and live exceptions package-local with
+        // .keywords(["~amd64"]) or .keywords(["**"]); never enable global ~amd64.
         packages: vec![
             // Keep the updater itself under Portage ownership so every update
             // mode can bootstrap into the latest installation logic.
             Package::new("app-admin/oxys"),
             Package::new("sys-block/zram-init"),
+            // The compiler defaults (compiler.rs) generate a make.conf with
+            // LDFLAGS="-fuse-ld=mold" and FEATURES="ccache". Track both tools
+            // in @world so the toolchain the make.conf demands is always
+            // installed; without mold every source build fails to link.
+            Package::new("sys-devel/mold"),
+            Package::new("dev-util/ccache"),
+            // Intel CPU updates are separate from linux-firmware. The live
+            // image supplies the generic payload and dracut policy; listing
+            // it here keeps the package in @world on the installed target.
+            // iucode_tool is an intel-microcode build dependency rather than
+            // a runtime dependency, so track it explicitly for future rebuilds.
+            Package::new("sys-apps/iucode_tool"),
+            Package::new("sys-firmware/intel-microcode")
+                .accept_licenses(["intel-ucode"]),
+            // Firewall: renders /var/lib/nftables/rules-save from the typed
+            // policy above; the OpenRC nftables service loads it at boot.
+            Package::new("net-firewall/nftables"),
             // Base CLI tooling — present on the ISO and rsync'd to the target,
             // listed here so they're tracked in @world and kept across updates.
             Package::new("net-misc/curl"),
             Package::new("dev-vcs/git"),
             Package::new("app-misc/fastfetch"),
+            // Time synchronization, persistent system logs with rotation,
+            // and recurring maintenance. Keep these in sync with the live ISO
+            // package set so the rsync'd target and @world agree.
+            Package::new("net-misc/chrony"),
+            Package::new("app-admin/sysklogd"),
+            Package::new("app-admin/logrotate"),
+            Package::new("sys-process/cronie"),
             Package::new("www-client/firefox-bin"),
             Package::new("media-video/pipewire"),
         ],
         services: oxys::services! {
             openrc: {
-                sysinit: ["cgroups", "devfs", "dmesg", "kmod-static-nodes", "sysfs", "systemd-tmpfiles-setup-dev", "udev", "udev-trigger"],
-                boot: ["binfmt", "bootmisc", "fsck", "hostname", "hwclock", "keymaps", "localmount", "loopback", "modules", "mtab", "procfs", "root", "save-keymaps", "save-termencoding", "seedrng", "swap", "sysctl", "systemd-tmpfiles-setup", "termencoding"],
                 boot_if: [(use_zram, "zram-init")],
-                default: ["local", "netmount", "modemmanager", "NetworkManager", "sshd"],
-                nonetwork: ["local"],
-                shutdown: ["killprocs", "mount-ro", "savecache"],
+                default: [+"chronyd", +"sysklogd", +"cronie", +"sshd"],
             },
         },
         users: vec![User::prompt()

@@ -9,3 +9,7 @@ output/
 /oxys-build/oxys-overlay/app-admin/oxys/Manifest
 /oxys-iso/overlay/var/db/repos/oxys/app-admin/oxys/files/oxys-*
 /oxys-iso/overlay/var/db/repos/oxys/app-admin/oxys/Manifest
+
+# ISO copies of the canonical installer profiles. build.sh and
+# build-installer-overlay.sh refresh these from oxys-installer/configs/.
+/oxys-iso/overlay/root/configs/

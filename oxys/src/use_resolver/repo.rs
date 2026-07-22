@@ -65,12 +65,12 @@ fn configured_repo_roots() -> Vec<PathBuf> {
 fn extend_repo_roots_from_config(repo_roots: &mut Vec<PathBuf>, contents: &str) {
     for line in contents.lines() {
         let line = line.split('#').next().unwrap_or_default().trim();
-        if let Some((key, value)) = line.split_once('=') {
-            if key.trim() == "location" {
-                let value = value.trim();
-                if !value.is_empty() {
-                    push_unique_path(repo_roots, PathBuf::from(value));
-                }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "location"
+        {
+            let value = value.trim();
+            if !value.is_empty() {
+                push_unique_path(repo_roots, PathBuf::from(value));
             }
         }
     }

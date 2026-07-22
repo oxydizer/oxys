@@ -1,5 +1,10 @@
 //! Integration tests for the compile-time package existence check against a
 //! fixture Portage tree.
+//!
+//! Pure suggestion ranking / levenshtein coverage lives in the package_check
+//! unit tests. This file covers FS load, version collapsing, and the public
+//! check_packages API. FixtureRepo helper shape is also pinned here so those
+//! tests run once (not once per integration binary that includes support/).
 
 mod support;
 
@@ -16,16 +21,32 @@ fn manifest_with(atoms: &[&str]) -> SystemManifest {
 }
 
 #[test]
-fn misspelled_name_yields_suggestion() {
-    let repo = FixtureRepo::new()
-        .with_package("gui-apps/wl-clipboard", &[])
-        .with_package("net-misc/curl", &[]);
-    let index = PackageIndex::load(repo.root.path()).expect("fixture should be a valid repo");
-    assert!(index.contains("gui-apps", "wl-clipboard"));
-    assert_eq!(
-        index.suggest("gui-apps", "wl-clipbord"),
-        vec!["gui-apps/wl-clipboard"]
-    );
+fn fixture_repo_creates_minimal_structure() {
+    let f = FixtureRepo::new().with_package("gui-wm/niri", &["wayland"]);
+    let root = f.root.path();
+    assert!(root.join("metadata").join("md5-cache").is_dir());
+    let entry = root
+        .join("metadata")
+        .join("md5-cache")
+        .join("gui-wm")
+        .join("niri-1.0.0");
+    assert!(entry.is_file());
+    let text = std::fs::read_to_string(&entry).unwrap();
+    assert!(text.contains("IUSE=wayland"));
+    assert!(text.contains("KEYWORDS=amd64"));
+}
+
+#[test]
+fn fixture_repo_supports_versioned_atom() {
+    let f = FixtureRepo::new().with_package("app-admin/example-2.1.0-r3", &[]);
+    let entry = f
+        .root
+        .path()
+        .join("metadata")
+        .join("md5-cache")
+        .join("app-admin")
+        .join("example-2.1.0-r3");
+    assert!(entry.is_file());
 }
 
 #[test]

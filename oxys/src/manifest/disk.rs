@@ -132,8 +132,10 @@ impl Default for EfiPartition {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SwapConfig {
     /// Compatibility sentinel: use the manifest's top-level `swap` policy.
+    #[default]
     Unspecified,
     /// Dedicated swap partition of given size in bytes
     Partition { size: u64 },
@@ -145,12 +147,6 @@ pub enum SwapConfig {
     Zram { size: u64 },
     /// No swap
     None,
-}
-
-impl Default for SwapConfig {
-    fn default() -> Self {
-        Self::Unspecified
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,16 +230,12 @@ fn default_zfs_boot_compression() -> String {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ZfsCanmount {
+    #[default]
     On,
     Off,
     Noauto,
-}
-
-impl Default for ZfsCanmount {
-    fn default() -> Self {
-        Self::On
-    }
 }
 
 impl ZfsCanmount {

@@ -76,7 +76,7 @@ pub(crate) fn draw_ui(frame: &mut Frame, app: &App) {
             app.install_progress,
             app.hardware_spinner_idx,
         ),
-        Screen::Done => draw_done(frame, body),
+        Screen::Done => draw_done(frame, body, app.install_elapsed()),
     }
 
     draw_divider(frame, vertical[3]);

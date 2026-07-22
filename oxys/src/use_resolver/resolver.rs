@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -55,6 +56,29 @@ pub fn resolve_latest_version(
     package: &str,
     portage_tree: &Path,
 ) -> Result<String, UseResolverError> {
+    resolve_latest_version_with_policy(package, portage_tree, KeywordPolicy::PreferStable)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeywordPolicy {
+    StableOnly,
+    StableAndTesting,
+    Any,
+    PreferStable,
+}
+
+#[derive(Debug)]
+struct VersionCandidate {
+    version: String,
+    stable_amd64: bool,
+    testing_amd64: bool,
+}
+
+fn resolve_latest_version_with_policy(
+    package: &str,
+    portage_tree: &Path,
+    keyword_policy: KeywordPolicy,
+) -> Result<String, UseResolverError> {
     let (category, package_name) =
         package
             .split_once('/')
@@ -69,23 +93,76 @@ pub fn resolve_latest_version(
     }
 
     let repo_roots = discover_repo_roots(portage_tree);
-    let mut versions = repo_roots
+    let candidates = repo_roots
         .iter()
-        .flat_map(|repo_root| list_package_versions(repo_root, category, package_name))
-        .filter(|version| !is_live_version(version))
+        .flat_map(|repo_root| {
+            list_package_versions(repo_root, category, package_name)
+                .into_iter()
+                .map(|version| {
+                    let metadata_path = repo_root
+                        .join("metadata")
+                        .join("md5-cache")
+                        .join(category)
+                        .join(format!("{package_name}-{version}"));
+                    let keywords = fs::read_to_string(metadata_path)
+                        .ok()
+                        .and_then(|contents| {
+                            contents
+                                .lines()
+                                .find_map(|line| line.strip_prefix("KEYWORDS="))
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_default();
+                    VersionCandidate {
+                        version,
+                        stable_amd64: keywords.split_whitespace().any(|item| item == "amd64"),
+                        testing_amd64: keywords.split_whitespace().any(|item| item == "~amd64"),
+                    }
+                })
+        })
         .collect::<Vec<_>>();
 
-    versions.sort_by(|left, right| compare_gentoo_versions(left, right));
-    versions.pop().ok_or_else(|| {
-        metadata_not_found(
-            package,
-            portage_tree
-                .join("metadata")
-                .join("md5-cache")
-                .join(category)
-                .join(format!("{package_name}-")),
-            portage_tree,
-        )
+    let newest = |filter: &dyn Fn(&VersionCandidate) -> bool, live: bool| {
+        let mut versions = candidates
+            .iter()
+            .filter(|candidate| is_live_version(&candidate.version) == live)
+            .filter(|candidate| filter(candidate))
+            .map(|candidate| candidate.version.clone())
+            .collect::<Vec<_>>();
+        versions.sort_by(|left, right| compare_gentoo_versions(left, right));
+        versions.dedup();
+        versions.pop()
+    };
+    let stable = |candidate: &VersionCandidate| candidate.stable_amd64;
+    let stable_or_testing =
+        |candidate: &VersionCandidate| candidate.stable_amd64 || candidate.testing_amd64;
+    let any = |_candidate: &VersionCandidate| true;
+
+    let selected = match keyword_policy {
+        KeywordPolicy::StableOnly => newest(&stable, false),
+        KeywordPolicy::StableAndTesting => newest(&stable_or_testing, false),
+        KeywordPolicy::Any => newest(&any, false).or_else(|| newest(&any, true)),
+        KeywordPolicy::PreferStable => newest(&stable, false)
+            .or_else(|| newest(&any, false))
+            .or_else(|| newest(&any, true)),
+    };
+
+    selected.ok_or_else(|| {
+        if keyword_policy == KeywordPolicy::StableOnly && !candidates.is_empty() {
+            UseResolverError::NoStableVersion {
+                package: package.to_owned(),
+            }
+        } else {
+            metadata_not_found(
+                package,
+                portage_tree
+                    .join("metadata")
+                    .join("md5-cache")
+                    .join(category)
+                    .join(format!("{package_name}-")),
+                portage_tree,
+            )
+        }
     })
 }
 
@@ -248,7 +325,18 @@ fn resolve_manifest_versions(
     for package in &mut resolved.packages {
         package.version = normalize_version(package.version.take());
         if package.version.is_none() {
-            package.version = Some(resolve_latest_version(&package.package, portage_tree)?);
+            let keyword_policy = if package.keywords.iter().any(|keyword| keyword == "**") {
+                KeywordPolicy::Any
+            } else if package.keywords.iter().any(|keyword| keyword == "~amd64") {
+                KeywordPolicy::StableAndTesting
+            } else {
+                KeywordPolicy::StableOnly
+            };
+            package.version = Some(resolve_latest_version_with_policy(
+                &package.package,
+                portage_tree,
+                keyword_policy,
+            )?);
         }
     }
 
@@ -420,7 +508,7 @@ impl PackageState {
         // would have done by hand. An explicit binary pin combined with custom
         // flags is a real contradiction and is left for
         // `collect_use_flags_binary_conflicts` to report as a hard conflict.
-        let resolved_binary = binary_requested && !(has_custom_use && !manifest.binary);
+        let resolved_binary = binary_requested && (manifest.binary || !has_custom_use);
         let available_flags = metadata
             .iuse
             .iter()

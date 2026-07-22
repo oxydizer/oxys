@@ -1,0 +1,99 @@
+# OxysOS desktop/laptop hardware baseline.
+# merge_kernel_config() concatenates this between base.config and the
+# per-microarch ${ARCH_NAME}.fragment, so an arch fragment can still override
+# a symbol here (e.g. disabling a DRM driver the CPU vendor doesn't need).
+# Without this, `merge_kernel_config()` starts from base.config + arch
+# fragment alone (no defconfig baseline), so anything not explicitly listed
+# and not upstream `default y` is silently absent -- these are the desktop/
+# laptop essentials that were missing on real hardware even though the ISO
+# boots fine in QEMU. assert_boot_critical_kernel_config() (below) fails the
+# build if olddefconfig silently drops any of these.
+
+# --- CPU frequency scaling (both vendors; ACPI fallback) ---
+# Built-in drivers probe the CPU vendor at init and no-op on a mismatch, so
+# shipping all three on every microarch image is safe and keeps one kernel
+# usable across Intel/AMD/virtualized hardware.
+CONFIG_X86_INTEL_PSTATE=y
+CONFIG_X86_AMD_PSTATE=y
+CONFIG_X86_ACPI_CPUFREQ=m
+
+# --- RTC (the boot-runlevel hwclock service depends on this) ---
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_DRV_CMOS=y
+
+# --- Firewall / NAT / containers ---
+CONFIG_NETFILTER=y
+CONFIG_NF_CONNTRACK=m
+CONFIG_NF_TABLES=m
+CONFIG_NF_TABLES_INET=y
+CONFIG_NFT_CT=m
+CONFIG_NFT_NAT=m
+CONFIG_NFT_MASQ=m
+CONFIG_NFT_REJECT=m
+CONFIG_NF_NAT=m
+CONFIG_BRIDGE=m
+CONFIG_MEMCG=y
+CONFIG_CGROUP_PIDS=y
+CONFIG_CPUSETS=y
+CONFIG_BLK_CGROUP=y
+
+# --- Desktop filesystems ---
+CONFIG_FUSE_FS=m
+CONFIG_EXFAT_FS=m
+CONFIG_NTFS3_FS=m
+
+# --- Webcams ---
+CONFIG_MEDIA_SUPPORT=m
+CONFIG_MEDIA_USB_SUPPORT=y
+CONFIG_MEDIA_CAMERA_SUPPORT=y
+CONFIG_USB_VIDEO_CLASS=m
+
+# --- Bluetooth ---
+CONFIG_BT=m
+CONFIG_BT_RFCOMM=m
+CONFIG_BT_HIDP=m
+CONFIG_BT_HCIBTUSB=m
+CONFIG_UHID=m
+
+# --- Modern laptop input (I2C touchpads/touchscreens) ---
+CONFIG_I2C=y
+CONFIG_I2C_HID_ACPI=m
+CONFIG_I2C_DESIGNWARE_CORE=y
+CONFIG_I2C_DESIGNWARE_PLATFORM=y
+CONFIG_PINCTRL_INTEL=y
+CONFIG_PINCTRL_AMD=y
+CONFIG_MFD_INTEL_LPSS_PCI=y
+CONFIG_HID_MULTITOUCH=m
+CONFIG_RMI4_CORE=m
+CONFIG_RMI4_SMB=m
+
+# --- Modern Intel laptop audio (DMIC mics) ---
+CONFIG_SND_SOC=m
+CONFIG_SND_SOC_SOF_TOPLEVEL=y
+CONFIG_SND_SOC_SOF_PCI=m
+CONFIG_SND_SOC_SOF_INTEL_TOPLEVEL=y
+CONFIG_SND_SOC_SOF_HDA_LINK=y
+CONFIG_SND_SOC_SOF_HDA_AUDIO_CODEC=y
+
+# --- LUKS groundwork (unblocks the encryption plan; cryptsetup already ships) ---
+CONFIG_DM_CRYPT=m
+CONFIG_CRYPTO_XTS=y
+CONFIG_CRYPTO_AES_NI_INTEL=y
+CONFIG_CRYPTO_SHA256=y
+CONFIG_CRYPTO_USER_API_SKCIPHER=y
+
+# --- Storage/docks/readers ---
+CONFIG_MMC=m
+CONFIG_MMC_SDHCI=m
+CONFIG_MMC_SDHCI_PCI=m
+CONFIG_MISC_RTSX_PCI=m
+CONFIG_TYPEC=m
+CONFIG_TYPEC_UCSI=m
+CONFIG_UCSI_ACPI=m
+CONFIG_USB4=m
+
+# --- Dev/VMs ---
+CONFIG_KVM=m
+CONFIG_KVM_INTEL=m
+CONFIG_KVM_AMD=m
+CONFIG_VHOST_NET=m

@@ -6,8 +6,10 @@ dirty worktree.
 
 ## Authoritative paths
 
-- `oxys-installer/configs/*.fe2o3` are the canonical installer profiles.
-  Keep their copies in `oxys-iso/overlay/root/configs/` byte-for-byte in sync.
+- `oxys-installer/configs/*.fe2o3` are the canonical installer profiles and the
+  only tracked copies. `oxys-iso/overlay/root/configs/` is a gitignored build
+  artifact refreshed from them by `build.sh` / `build-installer-overlay.sh`;
+  never edit it directly.
 - `oxys-iso/portage_confdir/` controls packages built into the live root.
   Installer profile package flags also matter because they control later target
   updates. Desktop-critical USE flags generally belong in both places.

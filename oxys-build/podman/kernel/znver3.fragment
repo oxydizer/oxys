@@ -4,4 +4,6 @@
 CONFIG_DRM_I915=n
 CONFIG_DRM_AMDGPU=y
 CONFIG_X86_AMD_PSTATE=y
-CONFIG_X86_AMD_PSTATE_DEFAULT_MODE=3
+# X86_AMD_PSTATE_DEFAULT_MODE was removed upstream (~6.10); olddefconfig was
+# silently dropping it here. Select an amd-pstate mode via the `amd_pstate=`
+# kernel cmdline parameter at boot instead, if one is needed.

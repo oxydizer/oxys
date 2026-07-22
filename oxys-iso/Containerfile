@@ -9,20 +9,24 @@
 # ---------------------------------------------------------------------------
 FROM docker.io/gentoo/stage3:amd64-openrc
 
-# catalyst is ~amd64 (testing) on a stable stage3, and pulls two USE flags that
-# aren't on by default. These are the keyword/USE changes surfaced by emerge;
-# they live in the package.* DIRECTORIES that the stage3 ships.
+# catalyst is ~amd64 (testing) on a stable stage3, and its build stack needs
+# package-local USE settings that are not all enabled by default. These are the
+# keyword/USE changes surfaced by emerge; they live in the package.*
+# DIRECTORIES that the stage3 ships.
+# Gentoo's squashfs-tools-ng ebuild names its XZ codec USE flag `lzma` and
+# translates it to upstream's --with-xz option. Do not change it to `xz`.
 RUN echo 'dev-util/catalyst ~amd64' > /etc/portage/package.accept_keywords/catalyst \
  && printf '%s\n' \
       '>=sys-apps/util-linux-2.41.4-r1 python' \
       '>=sys-boot/grub-2.14-r5 grub_platforms_efi-32' \
+      'sys-fs/squashfs-tools-ng lzma' \
       > /etc/portage/package.use/catalyst
 
 # Sync portage and install catalyst. The gentoo repo tree is kept in the image
 # (it is only needed to install/maintain catalyst itself; the actual ISO build
 # uses catalyst's own repo snapshots, not this tree).
 RUN emerge-webrsync \
- && emerge -j --quiet-build dev-util/catalyst \
+ && emerge -j --quiet-build 'sys-fs/squashfs-tools-ng[lzma]' dev-util/catalyst \
  && rm -rf /var/cache/distfiles/*
 
 # The default catalyst.conf already sets storedir="/var/tmp/catalyst", which is

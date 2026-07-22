@@ -42,10 +42,12 @@ pub(crate) fn install(artifact: &Path, root: &Path) -> Result<(), Box<dyn Error>
     );
     let metadata = oxys::packages::install(artifact, root)?;
     println!(
-        "Installed {}/{} into {}",
+        "Installed {}/{} into {} (version hold >{}/{} in /etc/portage/package.mask/oxys)",
         metadata.portage.category,
         metadata.portage.pf,
-        root.display()
+        root.display(),
+        metadata.portage.category,
+        metadata.portage.pf
     );
     Ok(())
 }

@@ -196,6 +196,40 @@ impl SafeRoot {
         }
     }
 
+    /// Verify that every existing parent component of a control path is a
+    /// real directory, so a later `write_control` cannot fail mid-transaction
+    /// with a raw ENOTDIR. Missing components are fine: `write_control`
+    /// creates them. Existing non-directory components (including symlinks,
+    /// which `SafeRoot` never follows) are reported as a clear error.
+    pub(crate) fn preflight_control_directory(&self, path: &str) -> Result<()> {
+        validate_relative_path(path)?;
+        let mut parts = path.split('/');
+        let _leaf = parts.next_back();
+        let mut current = rustix::io::dup(&self.fd).map_err(errno)?;
+        let mut walked = String::new();
+        for component in parts {
+            if !walked.is_empty() {
+                walked.push('/');
+            }
+            walked.push_str(component);
+            let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+            match rfs::openat(&current, component, flags, Mode::empty()) {
+                Ok(next) => current = next,
+                Err(error) if error == rustix::io::Errno::NOENT => return Ok(()),
+                Err(error)
+                    if error == rustix::io::Errno::NOTDIR || error == rustix::io::Errno::LOOP =>
+                {
+                    return Err(PackageError::invalid(format!(
+                        "/{walked} exists but is not a directory; convert it to one (for \
+                         example, move the existing file to /{walked}/local) and retry"
+                    )));
+                }
+                Err(error) => return Err(errno(error).into()),
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn open_regular(&self, path: &str) -> Result<File> {
         let (parent, name) = self.open_parent(path, false)?;
         let fd = rfs::openat(

@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::manifest::{
     AudioStack, Compositor, DesktopShell, DisplayStack, InitSystem, LoginFrontend, Package,
-    SeatBackend, SessionMode, SessionTracker, SessionUser, SystemManifest,
+    SeatBackend, SessionMode, SessionTracker, SessionUser, SystemManifest, Terminal,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +59,7 @@ pub struct SessionPolicy {
     pub login: LoginFrontend,
     pub compositor: Option<Compositor>,
     pub desktop_shell: Option<DesktopShell>,
+    pub terminal: Terminal,
     pub seat: SeatBackend,
     pub session_tracker: SessionTracker,
     pub display_stack: Option<DisplayStack>,
@@ -173,6 +174,7 @@ pub fn resolve_session(manifest: &SystemManifest) -> Result<ResolvedSession, Ses
                 login,
                 compositor: None,
                 desktop_shell: None,
+                terminal: manifest.session.terminal,
                 seat: SeatBackend::Direct,
                 session_tracker: SessionTracker::None,
                 display_stack: None,
@@ -221,6 +223,7 @@ pub fn resolve_session(manifest: &SystemManifest) -> Result<ResolvedSession, Ses
         (has_package(manifest, "media-video/pipewire") || desktop_shell.is_some())
             .then_some(AudioStack::Pipewire)
     });
+    let terminal = manifest.session.terminal;
     if desktop_shell == Some(DesktopShell::Noctalia) && audio_stack != Some(AudioStack::Pipewire) {
         return Err(invalid(
             "session.desktop_shell = noctalia requires audio_stack = pipewire",
@@ -255,6 +258,17 @@ pub fn resolve_session(manifest: &SystemManifest) -> Result<ResolvedSession, Ses
             &["/etc/inittab".to_owned(), "PAM".to_owned()],
         ),
         decision(
+            "session.terminal",
+            terminal.executable(),
+            if terminal == Terminal::default() {
+                DecisionSource::Default
+            } else {
+                DecisionSource::Explicit
+            },
+            "terminal used by Niri shortcuts and the first-login welcome",
+            &[terminal.package().to_owned()],
+        ),
+        decision(
             "session.seat",
             seat_name(seat),
             if manifest.session.seat == SeatBackend::Auto {
@@ -280,6 +294,7 @@ pub fn resolve_session(manifest: &SystemManifest) -> Result<ResolvedSession, Ses
 
     let mut requirements = SessionRequirements::default();
     push_unique(&mut requirements.packages, "gui-wm/niri");
+    push_unique(&mut requirements.packages, terminal.package());
     push_unique(&mut requirements.packages, "sys-apps/dbus");
     push_unique(&mut requirements.services, "dbus");
     if seat == SeatBackend::Seatd {
@@ -359,7 +374,7 @@ pub fn resolve_session(manifest: &SystemManifest) -> Result<ResolvedSession, Ses
             package,
             DecisionSource::Dependency,
             "required by the resolved graphical session",
-            &[package.clone()],
+            std::slice::from_ref(package),
         ));
     }
 
@@ -371,6 +386,7 @@ pub fn resolve_session(manifest: &SystemManifest) -> Result<ResolvedSession, Ses
             login,
             compositor: Some(manifest.session.compositor),
             desktop_shell,
+            terminal,
             seat,
             session_tracker,
             display_stack: Some(display_stack),

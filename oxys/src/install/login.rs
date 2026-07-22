@@ -1,8 +1,8 @@
-use std::{fs, path::Path, sync::mpsc::Sender};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, sync::mpsc::Sender};
 
 use crate::{
     graphics::ResolvedGraphics,
-    manifest::{DesktopShell, SystemManifest, User},
+    manifest::{DesktopShell, SystemManifest, Terminal, User},
     session::{ResolvedSession, ResolvedSessionMode},
 };
 
@@ -28,13 +28,13 @@ pub(super) fn setup_login(
 ) -> Result<(), SystemInstallError> {
     // Stop the installed system from re-launching the installer on tty1.
     let bash_profile = target_mount.join("root/.bash_profile");
-    if let Ok(contents) = fs::read_to_string(&bash_profile) {
-        if contents.contains("oxys-installer") {
-            fs::remove_file(&bash_profile)?;
-            let _ = sender.send(SystemInstallEvent::StepOutput {
-                line: "removed live-medium installer autostart from /root/.bash_profile".to_owned(),
-            });
-        }
+    if let Ok(contents) = fs::read_to_string(&bash_profile)
+        && contents.contains("oxys-installer")
+    {
+        fs::remove_file(&bash_profile)?;
+        let _ = sender.send(SystemInstallEvent::StepOutput {
+            line: "removed live-medium installer autostart from /root/.bash_profile".to_owned(),
+        });
     }
 
     let login_user = resolved
@@ -42,6 +42,7 @@ pub(super) fn setup_login(
         .user_index
         .and_then(|index| manifest.users.get(index));
     if let Some(user) = login_user {
+        write_welcome_launcher(resolved.policy.terminal, target_mount)?;
         write_graphical_session_files(user, resolved, resolved_graphics, target_mount, sender)?;
     }
     write_file(
@@ -97,6 +98,19 @@ pub(super) fn setup_login(
     Ok(())
 }
 
+/// Install the Niri first-login launcher globally. Its marker is deliberately
+/// per-user, so every account sees the welcome once without requiring write
+/// access to shared state under /var/lib.
+fn write_welcome_launcher(
+    terminal: Terminal,
+    target_mount: &Path,
+) -> Result<(), SystemInstallError> {
+    let path = target_mount.join("usr/local/bin/oxys-welcome-once");
+    write_file(&path, &welcome_launcher_contents(terminal))?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+    Ok(())
+}
+
 fn system_session_config(resolved: &ResolvedSession) -> String {
     let fallback = match resolved.policy.login {
         crate::manifest::LoginFrontend::OxysLogin {
@@ -135,7 +149,9 @@ fn write_graphical_session_files(
             NOCTALIA_OXYSOS_PALETTE,
         )?;
     }
-    write_file(&home.join(".config/foot/foot.ini"), FOOT_CONFIG)?;
+    if resolved.policy.terminal == Terminal::Foot {
+        write_file(&home.join(".config/foot/foot.ini"), FOOT_CONFIG)?;
+    }
     fs::create_dir_all(home.join("Pictures/Screenshots"))?;
 
     if target_passwd_has_user(target_mount, name) {
@@ -188,6 +204,7 @@ fn niri_config_contents(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    config = config.replace("__OXYS_TERMINAL__", resolved.policy.terminal.executable());
     if let Some(prime) = &resolved_graphics.requirements.prime {
         config.push_str(&format!(
             "\n\ndebug {{\n    render-drm-device \"{}\"\n}}",
@@ -275,8 +292,8 @@ layout {
     }
     default-column-width { proportion 0.5; }
     focus-ring {
-        width 3
-        active-color "#66d9ef"
+        width 1
+        active-color "#F55926"
         inactive-color "#505050"
     }
     border {
@@ -290,13 +307,14 @@ hotkey-overlay {
 
 spawn-at-startup "sh" "-c" "command -v xwayland-satellite >/dev/null 2>&1 && exec xwayland-satellite"
 spawn-at-startup "sh" "-c" "command -v udiskie >/dev/null 2>&1 && exec udiskie --no-tray"
+spawn-at-startup "/usr/local/bin/oxys-welcome-once"
 // On OpenRC, PipeWire and WirePlumber are user-session processes rather than
 // system services. Gentoo's launcher starts both inside Niri's D-Bus session;
 // Noctalia retries below until PipeWire is ready because it requires a daemon.
 spawn-at-startup "sh" "-c" "command -v gentoo-pipewire-launcher >/dev/null 2>&1 && exec gentoo-pipewire-launcher"
 spawn-at-startup "sh" "-c" "until noctalia; do sleep 2; done"
 spawn-at-startup "sh" "-c" "for agent in /usr/libexec/polkit-gnome-authentication-agent-1 /usr/lib/polkit-gnome/polkit-gnome-authentication-agent-1; do [ -x \"$agent\" ] && exec \"$agent\"; done"
-spawn-at-startup "sh" "-c" "gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true; gsettings set org.gnome.desktop.interface icon-theme 'Papirus-Dark' 2>/dev/null || true"
+spawn-at-startup "sh" "-c" "gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true; gsettings set org.gnome.desktop.interface icon-theme 'Adwaita' 2>/dev/null || true"
 
 screenshot-path "~/Pictures/Screenshots/screenshot-%Y%m%d-%H%M%S.png"
 
@@ -310,6 +328,14 @@ environment {
 cursor {
     xcursor-theme "default"
     xcursor-size 24
+}
+
+// Keep the first-login TUI distinct from ordinary terminal windows and present
+// it as a floating window. The launcher assigns this app-id on every supported
+// terminal.
+window-rule {
+    match app-id="^oxys-welcome$"
+    open-floating true
 }
 
 window-rule {
@@ -326,8 +352,8 @@ window-rule {
 }
 
 binds {
-    Mod+Return       { spawn "foot"; }
-    Mod+T            { spawn "foot"; }
+    Mod+Return       { spawn "__OXYS_TERMINAL__"; }
+    Mod+T            { spawn "__OXYS_TERMINAL__"; }
     Mod+D            { spawn "noctalia" "msg" "panel-toggle" "launcher"; }
     Mod+C            { spawn "noctalia" "msg" "panel-toggle" "control-center"; }
     Mod+B            { spawn "firefox"; }
@@ -383,8 +409,92 @@ binds {
 }
 "##;
 
+fn welcome_launcher_contents(terminal: Terminal) -> String {
+    r#"#!/bin/sh
+
+STATE_HOME="${XDG_STATE_HOME:-${HOME}/.local/state}"
+MARKER="${STATE_HOME}/oxys/welcome-v1"
+
+[ -e "${MARKER}" ] && exit 0
+command -v __OXYS_TERMINAL__ >/dev/null 2>&1 || exit 0
+[ -x /usr/bin/oxys ] || exit 0
+
+if __OXYS_WELCOME_COMMAND__; then
+    mkdir -p "$(dirname "${MARKER}")" && : > "${MARKER}"
+fi
+"#
+    .replace("__OXYS_TERMINAL__", terminal.executable())
+    .replace("__OXYS_WELCOME_COMMAND__", terminal.welcome_command())
+}
+
+const NOCTALIA_CONFIG: &str = r#"# OxysOS Noctalia v5 config.
+
+[shell]
+setup_wizard_enabled = false
+
+[bar.default]
+position = "bottom"
+background_opacity = 0.93
+margin_edge = 4
+start = [ "launcher", "active_window",  ]
+center = [  ]
+end = [ "workspaces", "tray", "notifications", "battery", "volume", "brightness", "control-center", "clock" ]
+thickness = 46
+
+[widget.launcher]
+custom_image = "/usr/share/oxys/icons/launcher.png"
+custom_image_colorize = false
+
+[dock]
+enabled = false
+auto_hide = true
+position = "bottom"
+
+[wallpaper]
+enabled = true
+directory = "/usr/share/backgrounds"
+fill_mode = "crop"
+
+[wallpaper.default]
+path = "/usr/share/backgrounds/default.png"
+
+[theme]
+source = "custom"
+builtin = "Noctalia"
+custom_palette = "OxysOS"
+mode = "dark"
+"#;
+
+const NOCTALIA_OXYSOS_PALETTE: &str = include_str!("noctalia-palette.json");
+
+const FOOT_CONFIG: &str = r#"font=monospace:size=11
+dpi-aware=yes
+
+[cursor]
+style=beam
+blink=yes
+
+[colors]
+alpha=0.95
+background=111111
+foreground=e8e8e8
+regular0=111111
+regular1=f66151
+regular2=57e389
+regular3=f8e45c
+regular4=62a0ea
+regular5=dc8add
+regular6=5bc8af
+regular7=e8e8e8
+
+[scrollback]
+lines=10000
+"#;
+
 #[cfg(test)]
 mod tests {
+    use std::{os::unix::fs::PermissionsExt, process::Command};
+
     use crate::{
         graphics::resolve_graphics,
         manifest::{
@@ -426,64 +536,83 @@ mod tests {
         assert!(config.contains("debug {"));
         assert!(config.contains("render-drm-device \"/dev/dri/renderD128\""));
     }
+
+    #[test]
+    fn selected_terminal_drives_niri_shortcuts_and_welcome_launcher() {
+        let manifest = SystemManifest {
+            session: Session {
+                mode: SessionMode::Graphical,
+                terminal: crate::manifest::Terminal::Kitty,
+                ..Session::default()
+            },
+            users: vec![User::new("alex")],
+            ..SystemManifest::default()
+        };
+        let session = manifest.resolved_session().unwrap();
+        let graphics = resolve_graphics(&manifest).unwrap();
+
+        let config = super::niri_config_contents(&session, &graphics);
+        assert!(config.contains("Mod+Return       { spawn \"kitty\"; }"));
+        assert!(config.contains("Mod+T            { spawn \"kitty\"; }"));
+        assert!(!config.contains("__OXYS_TERMINAL__"));
+
+        let launcher = super::welcome_launcher_contents(crate::manifest::Terminal::Kitty);
+        assert!(launcher.contains("command -v kitty"));
+        assert!(launcher.contains("kitty --class oxys-welcome /usr/bin/oxys welcome"));
+        assert!(!launcher.contains("foot"));
+    }
+
+    #[test]
+    fn welcome_launcher_runs_once_per_user() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let bin = temp.path().join("bin");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&bin).unwrap();
+
+        let foot = bin.join("foot");
+        std::fs::write(&foot, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&foot, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The production launcher intentionally requires the installed Oxys
+        // binary at /usr/bin/oxys. Substitute a ubiquitous executable here so
+        // this behavior test remains hermetic.
+        let launcher = super::welcome_launcher_contents(crate::manifest::Terminal::Foot)
+            .replace("[ -x /usr/bin/oxys ]", "[ -x /bin/true ]");
+        let run = || {
+            Command::new("sh")
+                .arg("-c")
+                .arg(&launcher)
+                .env("HOME", &home)
+                .env_remove("XDG_STATE_HOME")
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .status()
+                .unwrap()
+        };
+
+        assert!(run().success());
+        assert!(
+            !home.join(".local/state/oxys/welcome-v1").exists(),
+            "a failed welcome must remain retryable"
+        );
+
+        std::fs::write(
+            &foot,
+            "#!/bin/sh\nprintf 'run\\n' >> \"${HOME}/foot-runs\"\n",
+        )
+        .unwrap();
+        assert!(run().success());
+        assert!(home.join(".local/state/oxys/welcome-v1").is_file());
+        assert_eq!(
+            std::fs::read_to_string(home.join("foot-runs")).unwrap(),
+            "run\n"
+        );
+
+        assert!(run().success());
+        assert_eq!(
+            std::fs::read_to_string(home.join("foot-runs")).unwrap(),
+            "run\n",
+            "the marker must suppress subsequent launches"
+        );
+    }
 }
-
-const NOCTALIA_CONFIG: &str = r#"# OxysOS Noctalia v5 config.
-
-[shell]
-setup_wizard_enabled = false
-
-[bar.default]
-position = "bottom"
-background_opacity = 0.93
-margin_edge = 4
-start = [ "launcher", "clock", "active_window",  ]
-center = [ "workspaces" ]
-end = [ "tray", "notifications", "battery", "volume", "brightness", "control-center" ]
-thickness = 40
-
-[widget.launcher]
-custom_image = "/usr/share/oxys/icons/launcher.svg"
-custom_image_colorize = true
-
-[dock]
-enabled = false
-auto_hide = true
-position = "bottom"
-
-[wallpaper]
-enabled = true
-directory = "/usr/share/backgrounds"
-
-[theme]
-source = "custom"
-builtin = "Noctalia"
-custom_palette = "OxysOS"
-mode = "dark"
-"#;
-
-const NOCTALIA_OXYSOS_PALETTE: &str = include_str!("noctalia-palette.json");
-
-const FOOT_CONFIG: &str = r#"font=monospace:size=11
-dpi-aware=yes
-
-[cursor]
-style=beam
-blink=yes
-
-[colors]
-alpha=0.95
-background=111111
-foreground=e8e8e8
-regular0=111111
-regular1=f66151
-regular2=57e389
-regular3=f8e45c
-regular4=62a0ea
-regular5=dc8add
-regular6=5bc8af
-regular7=e8e8e8
-
-[scrollback]
-lines=10000
-"#;

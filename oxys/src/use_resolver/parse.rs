@@ -230,16 +230,10 @@ fn parse_dependency_group(
             }
             _ => {
                 let token = cursor.next().unwrap_or_default();
-                if let Some((package, blocker, slot, subslot, slot_operator)) =
-                    extract_package_atom(token)
-                {
+                if let Some(dep) = extract_package_atom(token) {
                     deps.push(ConditionalDep {
                         condition: flatten_conditions(conditions),
-                        package,
-                        blocker,
-                        slot,
-                        subslot,
-                        slot_operator,
+                        ..dep
                     });
                 }
             }
@@ -267,16 +261,9 @@ fn flatten_conditions(conditions: &[String]) -> Option<String> {
     }
 }
 
-/// Extracts a normalized dependency atom and optional blocker marker from a token.
-fn extract_package_atom(
-    token: &str,
-) -> Option<(
-    String,
-    Option<BlockerKind>,
-    Option<String>,
-    Option<String>,
-    Option<SlotOperator>,
-)> {
+/// Extracts a normalized dependency atom and optional blocker marker from a
+/// token, as a `ConditionalDep` with no condition attached.
+fn extract_package_atom(token: &str) -> Option<ConditionalDep> {
     let trimmed = token
         .trim()
         .trim_matches('(')
@@ -300,7 +287,7 @@ fn extract_package_atom(
     let no_use_deps = atom.split('[').next()?;
     let (no_slot, slot, subslot, slot_operator) = parse_dependency_slot(no_use_deps);
 
-    let no_operator = no_slot.trim_start_matches(|ch: char| matches!(ch, '<' | '>' | '=' | '~'));
+    let no_operator = no_slot.trim_start_matches(['<', '>', '=', '~']);
 
     let (category, remainder) = no_operator.split_once('/')?;
     if category.is_empty() || remainder.is_empty() {
@@ -312,13 +299,14 @@ fn extract_package_atom(
         return None;
     }
 
-    Some((
-        format!("{category}/{package}"),
+    Some(ConditionalDep {
+        condition: None,
+        package: format!("{category}/{package}"),
         blocker,
         slot,
         subslot,
         slot_operator,
-    ))
+    })
 }
 
 fn parse_dependency_slot(

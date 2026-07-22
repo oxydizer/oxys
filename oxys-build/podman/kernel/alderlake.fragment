@@ -5,4 +5,9 @@
 CONFIG_DRM_I915=y
 CONFIG_DRM_AMDGPU=n
 CONFIG_INTEL_IDLE=y
-CONFIG_INTEL_PSTATE=y
+# The Intel P-state Kconfig symbol is X86_INTEL_PSTATE, not INTEL_PSTATE --
+# the latter doesn't exist and was silently dropped by olddefconfig, leaving
+# every Alder Lake image with no cpufreq driver at all. hardware.fragment
+# already sets the correct symbol for every arch; restated here for clarity
+# since this is the arch this driver actually targets.
+CONFIG_X86_INTEL_PSTATE=y

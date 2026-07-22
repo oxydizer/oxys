@@ -187,11 +187,10 @@ impl PamSession {
             let mut current = env;
             while !(*current).is_null() {
                 let raw = CStr::from_ptr(*current).to_string_lossy();
-                if let Some((key, value)) = raw.split_once('=') {
-                    if !key.is_empty() {
+                if let Some((key, value)) = raw.split_once('=')
+                    && !key.is_empty() {
                         result.push((key.to_string(), value.to_string()));
                     }
-                }
                 current = current.add(1);
             }
             pam_ffi::pam_misc_drop_env(env);

@@ -7,6 +7,17 @@ pub fn apply_required_use_rule(
     _decisions: &mut Vec<PortageDecision>,
 ) {
     for expr in &state.metadata.required_use {
+        // md5-cache IUSE defaults do not include the active profile's
+        // USE_EXPAND selections. Only reject a REQUIRED_USE expression here
+        // when the manifest explicitly controls every flag it references;
+        // otherwise Portage is the authoritative validator once it combines
+        // profile defaults with the generated package.use.
+        if !referenced_required_use_flags(expr)
+            .iter()
+            .all(|flag| state.is_explicit(flag))
+        {
+            continue;
+        }
         if let Some(reason) = explain_required_use_violation(expr, &state.enabled_flags) {
             conflicts.push(Conflict {
                 packages: vec![state.manifest.package.clone()],
@@ -28,9 +39,9 @@ pub fn apply_blocker_rule(
             continue;
         }
 
-        let blocked = all_packages
-            .iter()
-            .find(|candidate| candidate.manifest.package == dep.package);
+        let blocked = all_packages.iter().find(|candidate| {
+            candidate.manifest.package == dep.package && !std::ptr::eq(*candidate, state)
+        });
 
         let Some(blocked) = blocked else {
             continue;
@@ -63,11 +74,11 @@ pub fn apply_blocker_rule(
 pub fn apply_virtual_rule(
     state: &PackageState,
     all_packages: &[PackageState],
-    conflicts: &mut Vec<Conflict>,
+    _conflicts: &mut Vec<Conflict>,
     warnings: &mut Vec<Warning>,
 ) {
-    for dep in
-        iter_all_dependencies(&state.metadata).filter(|dep| dep.package.starts_with("virtual/"))
+    for dep in iter_all_dependencies(&state.metadata)
+        .filter(|dep| dep.blocker.is_none() && dep.package.starts_with("virtual/"))
     {
         if !dependency_condition_matches(dep, state) {
             continue;
@@ -86,16 +97,11 @@ pub fn apply_virtual_rule(
             .map(|candidate| candidate.manifest.package.clone())
             .collect::<Vec<_>>();
 
-        if providers.is_empty() {
-            conflicts.push(Conflict {
-                packages: vec![state.manifest.package.clone()],
-                flag: dep.package.clone(),
-                reason: format!(
-                    "virtual dependency {} has no selected provider",
-                    dep.package
-                ),
-            });
-        } else {
+        // A manifest lists world roots, not their full transitive closure.
+        // Portage selects normal virtual providers from that closure. Retain
+        // the useful note when the manifest explicitly includes a provider,
+        // but absence here is not an unresolved conflict.
+        if !providers.is_empty() {
             warnings.push(Warning {
                 package: state.manifest.package.clone(),
                 message: format!(
@@ -115,6 +121,12 @@ pub fn apply_slot_dependency_rule(
     warnings: &mut Vec<Warning>,
 ) {
     for dep in iter_all_dependencies(&state.metadata) {
+        // Blockers describe packages/slots that must *not* be selected. They
+        // are not positive slot dependencies (Firefox rapid, for example,
+        // blocks firefox-bin:0 and :esr while remaining a valid rapid slot).
+        if dep.blocker.is_some() {
+            continue;
+        }
         if !dependency_condition_matches(dep, state) {
             continue;
         }
@@ -123,57 +135,57 @@ pub fn apply_slot_dependency_rule(
             continue;
         }
 
-        let selected = all_packages
-            .iter()
-            .find(|candidate| candidate.manifest.package == dep.package);
+        let selected = all_packages.iter().find(|candidate| {
+            candidate.manifest.package == dep.package && !std::ptr::eq(*candidate, state)
+        });
 
         let Some(selected) = selected else {
             continue;
         };
 
-        if let Some(required_slot) = dep.slot.as_deref() {
-            if selected.metadata.slot.as_deref() != Some(required_slot) {
-                conflicts.push(Conflict {
-                    packages: vec![
-                        state.manifest.package.clone(),
-                        selected.manifest.package.clone(),
-                    ],
-                    flag: format!("{}:{}", dep.package, required_slot),
-                    reason: format!(
-                        "slot mismatch: {} requires {}:{} but selected package is in slot {}",
-                        state.manifest.package,
-                        dep.package,
-                        required_slot,
-                        selected.metadata.slot.as_deref().unwrap_or("(unset)")
-                    ),
-                });
-                continue;
-            }
+        if let Some(required_slot) = dep.slot.as_deref()
+            && selected.metadata.slot.as_deref() != Some(required_slot)
+        {
+            conflicts.push(Conflict {
+                packages: vec![
+                    state.manifest.package.clone(),
+                    selected.manifest.package.clone(),
+                ],
+                flag: format!("{}:{}", dep.package, required_slot),
+                reason: format!(
+                    "slot mismatch: {} requires {}:{} but selected package is in slot {}",
+                    state.manifest.package,
+                    dep.package,
+                    required_slot,
+                    selected.metadata.slot.as_deref().unwrap_or("(unset)")
+                ),
+            });
+            continue;
         }
 
-        if let Some(required_subslot) = dep.subslot.as_deref() {
-            if selected.metadata.subslot.as_deref() != Some(required_subslot) {
-                conflicts.push(Conflict {
-                    packages: vec![
-                        state.manifest.package.clone(),
-                        selected.manifest.package.clone(),
-                    ],
-                    flag: format!(
-                        "{}:{}/{}",
-                        dep.package,
-                        dep.slot.as_deref().unwrap_or(""),
-                        required_subslot
-                    ),
-                    reason: format!(
-                        "subslot mismatch: {} requires {} subslot {} but selected package has {}",
-                        state.manifest.package,
-                        dep.package,
-                        required_subslot,
-                        selected.metadata.subslot.as_deref().unwrap_or("(unset)")
-                    ),
-                });
-                continue;
-            }
+        if let Some(required_subslot) = dep.subslot.as_deref()
+            && selected.metadata.subslot.as_deref() != Some(required_subslot)
+        {
+            conflicts.push(Conflict {
+                packages: vec![
+                    state.manifest.package.clone(),
+                    selected.manifest.package.clone(),
+                ],
+                flag: format!(
+                    "{}:{}/{}",
+                    dep.package,
+                    dep.slot.as_deref().unwrap_or(""),
+                    required_subslot
+                ),
+                reason: format!(
+                    "subslot mismatch: {} requires {} subslot {} but selected package has {}",
+                    state.manifest.package,
+                    dep.package,
+                    required_subslot,
+                    selected.metadata.subslot.as_deref().unwrap_or("(unset)")
+                ),
+            });
+            continue;
         }
 
         match dep.slot_operator {

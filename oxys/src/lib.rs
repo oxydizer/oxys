@@ -8,6 +8,7 @@ pub mod exec;
 pub mod graphics;
 pub mod install;
 pub mod kernel_cmdline;
+pub mod locales;
 pub mod manifest;
 pub mod package_check;
 pub mod packages;
@@ -96,7 +97,59 @@ macro_rules! main {
 }
 
 #[macro_export]
+#[doc(hidden)]
+macro_rules! __services_apply_deltas {
+    ($services:expr;) => {};
+    ($services:expr; + $service:expr $(, $($rest:tt)*)?) => {
+        {
+            let service = $service.to_string();
+            if !$services.iter().any(|candidate| candidate == &service) {
+                $services.push(service);
+            }
+        }
+        $($crate::__services_apply_deltas!($services; $($rest)*);)?
+    };
+    ($services:expr; - $service:expr $(, $($rest:tt)*)?) => {
+        {
+            let service = $service.to_string();
+            $services.retain(|candidate| candidate != &service);
+        }
+        $($crate::__services_apply_deltas!($services; $($rest)*);)?
+    };
+}
+
+#[macro_export]
 macro_rules! services {
+    (
+        openrc: {
+            boot_if: [$(($boot_condition:expr_2021, $conditional_boot:expr_2021)),* $(,)?],
+            default: [$($default_deltas:tt)*] $(,)?
+        } $(,)?
+    ) => {
+        {
+            let mut openrc = $crate::manifest::OpenrcServices::recommended();
+            $(if $boot_condition { openrc.boot.push($conditional_boot.to_string()); })*
+            $crate::__services_apply_deltas!(openrc.default; $($default_deltas)*);
+            $crate::manifest::Services {
+                openrc,
+                ..Default::default()
+            }
+        }
+    };
+    (
+        openrc: {
+            default: [$($default_deltas:tt)*] $(,)?
+        } $(,)?
+    ) => {
+        {
+            let mut openrc = $crate::manifest::OpenrcServices::recommended();
+            $crate::__services_apply_deltas!(openrc.default; $($default_deltas)*);
+            $crate::manifest::Services {
+                openrc,
+                ..Default::default()
+            }
+        }
+    };
     (
         openrc: {
             sysinit: [$($sysinit:expr_2021),* $(,)?],
@@ -111,6 +164,8 @@ macro_rules! services {
             openrc: $crate::manifest::OpenrcServices {
                 sysinit: vec![$($sysinit.to_string()),*],
                 boot: {
+                    // `mut` is unused when the caller's `boot_if:` list is empty
+                    #[allow(unused_mut)]
                     let mut services = vec![$($boot.to_string()),*];
                     $(if $boot_condition { services.push($conditional_boot.to_string()); })*
                     services
@@ -262,6 +317,40 @@ mod tests {
         };
 
         assert_eq!(services.openrc.boot, vec!["modules", "zram-init"]);
+    }
+
+    #[test]
+    fn openrc_services_macro_applies_deltas_to_recommended_services() {
+        let services = crate::services! {
+            openrc: {
+                default: [+"sshd", -"modemmanager", +"sshd"],
+            },
+        };
+
+        assert_eq!(
+            services.openrc.default,
+            ["local", "netmount", "nftables", "NetworkManager", "sshd"]
+        );
+        assert_eq!(
+            services.openrc.sysinit,
+            crate::manifest::OpenrcServices::recommended().sysinit
+        );
+    }
+
+    #[test]
+    fn openrc_services_delta_macro_applies_conditional_boot_services() {
+        let services = crate::services! {
+            openrc: {
+                boot_if: [(false, "disabled"), (true, "zram-init")],
+                default: [],
+            },
+        };
+
+        assert_eq!(
+            services.openrc.boot.last().map(String::as_str),
+            Some("zram-init")
+        );
+        assert!(!services.openrc.contains("disabled"));
     }
 
     #[test]

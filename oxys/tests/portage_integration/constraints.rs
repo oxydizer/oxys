@@ -40,7 +40,7 @@ fn reports_virtual_slot_license_and_property_checks() -> Result<(), Box<dyn std:
 
     let manifest = SystemManifest {
         packages: vec![
-            Package::new("app-shells/example"),
+            Package::new("app-shells/example").keywords(["**"]),
             Package::new("app-text/provider"),
             Package::new("dev-libs/libfoo"),
         ],
@@ -77,9 +77,117 @@ fn reports_virtual_slot_license_and_property_checks() -> Result<(), Box<dyn std:
     assert!(plan.resolution.warnings.iter().any(|warning| {
         warning.package == "app-shells/example" && warning.message.contains("PDEPEND")
     }));
-    assert!(plan.resolution.warnings.iter().any(|warning| {
+    assert!(!plan.resolution.warnings.iter().any(|warning| {
         warning.package == "app-shells/example" && warning.message.contains("keyworded **")
     }));
+
+    cleanup(&root)?;
+    Ok(())
+}
+
+#[test]
+fn profile_single_target_required_use_is_left_for_portage() -> Result<(), Box<dyn std::error::Error>>
+{
+    let root = test_root("profile_single_target");
+    let portage_tree = root.join("repo");
+    let cache_dir = root.join("cache");
+
+    write_md5_cache(
+        &portage_tree,
+        "media-video/wireplumber",
+        "0.5.14",
+        concat!(
+            "IUSE=lua_single_target_lua5-3 lua_single_target_lua5-4\n",
+            "REQUIRED_USE=^^ ( lua_single_target_lua5-3 lua_single_target_lua5-4 )\n",
+            "KEYWORDS=amd64\n",
+        ),
+    )?;
+
+    let manifest = SystemManifest {
+        packages: vec![Package::new("media-video/wireplumber")],
+        ..SystemManifest::default()
+    };
+    let plan = plan_portage(&manifest, &portage_tree, &cache_dir)?;
+
+    assert!(
+        plan.resolution
+            .conflicts
+            .iter()
+            .all(|conflict| !conflict.reason.contains("REQUIRED_USE"))
+    );
+
+    cleanup(&root)?;
+    Ok(())
+}
+
+#[test]
+fn fully_explicit_required_use_contradiction_still_fails_early()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = test_root("explicit_single_target_conflict");
+    let portage_tree = root.join("repo");
+    let cache_dir = root.join("cache");
+
+    write_md5_cache(
+        &portage_tree,
+        "media-video/wireplumber",
+        "0.5.14",
+        concat!(
+            "IUSE=lua_single_target_lua5-3 lua_single_target_lua5-4\n",
+            "REQUIRED_USE=^^ ( lua_single_target_lua5-3 lua_single_target_lua5-4 )\n",
+            "KEYWORDS=amd64\n",
+        ),
+    )?;
+
+    let manifest = SystemManifest {
+        packages: vec![
+            Package::new("media-video/wireplumber")
+                .use_flags(["lua_single_target_lua5-3", "lua_single_target_lua5-4"]),
+        ],
+        ..SystemManifest::default()
+    };
+    let plan = plan_portage(&manifest, &portage_tree, &cache_dir)?;
+
+    assert!(plan.resolution.conflicts.iter().any(|conflict| {
+        conflict.reason.contains("REQUIRED_USE")
+            && conflict.reason.contains("exactly one")
+            && conflict.reason.contains("2 are")
+    }));
+
+    cleanup(&root)?;
+    Ok(())
+}
+
+#[test]
+fn transitive_virtuals_and_self_slot_blockers_are_not_manifest_conflicts()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = test_root("transitive_virtual_and_self_blocker");
+    let portage_tree = root.join("repo");
+    let cache_dir = root.join("cache");
+
+    write_md5_cache(
+        &portage_tree,
+        "www-client/example-bin",
+        "1.0.0",
+        concat!(
+            "RDEPEND=virtual/freedesktop-icon-theme !www-client/example-bin:0 !www-client/example-bin:esr\n",
+            "SLOT=rapid\n",
+            "KEYWORDS=amd64\n",
+        ),
+    )?;
+
+    let manifest = SystemManifest {
+        packages: vec![Package::new("www-client/example-bin")],
+        ..SystemManifest::default()
+    };
+    let plan = plan_portage(&manifest, &portage_tree, &cache_dir)?;
+
+    assert!(plan.resolution.conflicts.is_empty());
+    assert!(
+        plan.resolution
+            .warnings
+            .iter()
+            .all(|warning| !warning.message.contains("conflicts with selected package"))
+    );
 
     cleanup(&root)?;
     Ok(())
@@ -96,7 +204,7 @@ fn manifest_package_overrides_drive_keywords_and_licenses() -> Result<(), Box<dy
         &portage_tree,
         "gui-wm/niri",
         "25.11-r1",
-        "LICENSE=all-rights-reserved\nKEYWORDS=**\n",
+        "LICENSE=all-rights-reserved\nKEYWORDS=~amd64\n",
     )?;
 
     let manifest = SystemManifest {

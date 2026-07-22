@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use oxys::{
     detect::DetectedDisk,
@@ -52,6 +52,11 @@ pub(super) fn is_valid_login_name(name: &str) -> bool {
     }
     name.len() <= 32
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+pub(crate) fn format_install_elapsed(elapsed: Duration) -> String {
+    let total_seconds = elapsed.as_secs();
+    format!("{:02}:{:02}", total_seconds / 60, total_seconds % 60)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +152,8 @@ pub(crate) struct App {
     partition_task: Option<JoinHandle<()>>,
     install_task: Option<JoinHandle<()>>,
     pub(crate) install_progress: u16,
+    install_started_at: Option<Instant>,
+    install_elapsed: Option<Duration>,
     pub(crate) last_tick: Instant,
     tick_count: u64,
     pub(crate) hardware_action_idx: usize,
@@ -173,6 +180,10 @@ pub(crate) struct App {
     initial_config_mtimes: HashMap<String, Option<SystemTime>>,
     // --- config compilation / validation gate ---
     pub(crate) compiling: bool,
+    /// Time-based estimate shown while Cargo compiles the selected profile.
+    /// Completion itself still comes only from the worker result.
+    pub(crate) compile_progress: u16,
+    pub(crate) compile_started_at: Option<Instant>,
     pub(crate) compile_error: Option<oxys::compile::CompileError>,
     pub(crate) compile_notices: Vec<String>,
     pub(crate) defaults_report: Vec<String>,
@@ -232,6 +243,8 @@ impl App {
             partition_task: None,
             install_task: None,
             install_progress: 0,
+            install_started_at: None,
+            install_elapsed: None,
             last_tick: Instant::now(),
             tick_count: 0,
             hardware_action_idx: 0,
@@ -251,6 +264,8 @@ impl App {
             reboot_requested: false,
             pending_edit: None,
             compiling: false,
+            compile_progress: 0,
+            compile_started_at: None,
             compile_error: None,
             compile_notices: Vec::new(),
             defaults_report: Vec::new(),
@@ -341,10 +356,31 @@ impl App {
         self.install_rx.is_some()
     }
 
+    pub(crate) fn install_elapsed(&self) -> Option<Duration> {
+        self.install_elapsed.or_else(|| {
+            self.install_started_at
+                .map(|started_at| started_at.elapsed())
+        })
+    }
+
     pub(crate) fn step_labels() -> [&'static str; 7] {
         [
             "welcome", "hardware", "disk", // "partition",  // hidden for now
             "config", "confirm", "install", "done",
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::format_install_elapsed;
+
+    #[test]
+    fn install_elapsed_uses_total_minutes_and_padded_seconds() {
+        assert_eq!(format_install_elapsed(Duration::ZERO), "00:00");
+        assert_eq!(format_install_elapsed(Duration::from_secs(65)), "01:05");
+        assert_eq!(format_install_elapsed(Duration::from_secs(7_445)), "124:05");
     }
 }

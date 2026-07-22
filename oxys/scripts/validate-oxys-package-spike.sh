@@ -33,11 +33,19 @@ export NOCOLOR=true
 qcheck "$package"
 qlist -ICv "$atom" | grep -Fx "$package" >/dev/null
 
+hold_file=/etc/portage/package.mask/oxys
+if ! grep -Fx ">$category/$pf" "$hold_file" >/dev/null; then
+    echo "install did not register the version hold >$category/$pf in $hold_file" >&2
+    exit 1
+fi
+
 receipt=/var/lib/oxys/installed/$category/$pf.toml
 sha256sum "$receipt" >"$work/receipt.before"
 "$oxys_bin" package install "$artifact" --root /
 sha256sum -c "$work/receipt.before"
 
+# The version hold also guarantees this check when the tree carries a newer
+# version than the installed artifact.
 emerge --pretend -uDN @world >"$work/world.txt"
 if grep -Eq "^\[[^]]+\][[:space:]]+$category/$pf([[:space:]:]|$)" "$work/world.txt"; then
     echo "$package was selected by emerge -uDN @world" >&2
@@ -55,5 +63,11 @@ if qlist -ICv "$atom" | grep -Fx "$package" >/dev/null; then
     echo "$package is still visible to Portage after removal" >&2
     exit 1
 fi
+if [ -e "$hold_file" ] && grep -Fx ">$category/$pf" "$hold_file" >/dev/null; then
+    echo "removal left the version hold >$category/$pf in $hold_file" >&2
+    exit 1
+fi
+# Whether or not the hold fragment still exists, emerge must keep working.
+emerge --pretend -uDN @world >/dev/null
 
 echo "all .oxys Portage acceptance checks passed for $package"

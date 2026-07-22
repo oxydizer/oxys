@@ -132,6 +132,12 @@ pub(in crate::ui) fn draw_config_validate(frame: &mut Frame, area: Rect, app: &A
     );
 
     let body = vec![
+        progress_line(app.compile_progress, chunks[2].width.saturating_sub(10)),
+        Line::from(Span::styled(
+            "estimated — completion is confirmed by Cargo, not the timer",
+            Style::default().fg(FAINT),
+        )),
+        Line::from(""),
         Line::from(Span::styled(
             "Building the config into a checked manifest.toml…",
             Style::default().fg(DIM),

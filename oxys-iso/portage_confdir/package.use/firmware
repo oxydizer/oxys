@@ -1,0 +1,4 @@
+# Keep the complete, hardware-generic Intel payload and have dracut prepend it
+# to the live/installed initramfs for early loading. Never select only the ISO
+# builder's CPU: the finished image must boot arbitrary supported Intel CPUs.
+sys-firmware/intel-microcode initramfs split-ucode -hostonly

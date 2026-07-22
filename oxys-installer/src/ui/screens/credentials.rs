@@ -61,6 +61,13 @@ pub(in crate::ui) fn draw_timezone(frame: &mut Frame, area: Rect, app: &App) {
         chunks[1],
     );
 
+    // A timezone picker only needs a short viewport. Capping the panel keeps
+    // it from stretching to the full terminal height on large displays.
+    let panel = Rect {
+        height: chunks[2].height.min(15),
+        ..chunks[2]
+    };
+
     let mut body = vec![
         Line::from(vec![
             Span::styled(format!("{:<10}", "filter"), Style::default().fg(DIM)),
@@ -75,7 +82,9 @@ pub(in crate::ui) fn draw_timezone(frame: &mut Frame, area: Rect, app: &App) {
 
     // Fixed rows for the filter line, spacing, and the hint below; the rest
     // of the panel is the list viewport, kept scrolled around the cursor.
-    let viewport = (chunks[2].height.saturating_sub(4) as usize).saturating_sub(4).max(3);
+    let viewport = (panel.height.saturating_sub(4) as usize)
+        .saturating_sub(4)
+        .max(3);
     let cursor = app.timezone_cursor.min(zones.len().saturating_sub(1));
     let first = cursor
         .saturating_sub(viewport / 2)
@@ -113,7 +122,7 @@ pub(in crate::ui) fn draw_timezone(frame: &mut Frame, area: Rect, app: &App) {
         Style::default().fg(FAINT),
     )));
 
-    draw_focal_panel(frame, chunks[2], "timezone", ACCENT, body);
+    draw_focal_panel(frame, panel, "timezone", ACCENT, body);
 }
 
 pub(in crate::ui) fn draw_usernames(frame: &mut Frame, area: Rect, app: &App) {

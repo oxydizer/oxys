@@ -5,24 +5,21 @@ use crate::detect::detect_cpu_count;
 /// Controls the tradeoff between compile time and runtime performance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum BuildOptimisation {
     /// Fastest installs: mold linker, PGO disabled everywhere.
     Fast,
     /// Recommended default: mold linker, PGO only for known high-value packages.
+    #[default]
     Balanced,
     /// Maximum runtime performance: mold linker, PGO enabled everywhere.
     Performance,
 }
 
-impl Default for BuildOptimisation {
-    fn default() -> Self {
-        Self::Balanced
-    }
-}
-
 /// Target CPU microarchitecture level, compiled into `-march=` in make.conf.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum March {
     /// `-march=native` — tune for the machine performing the build.
     Native,
@@ -31,18 +28,10 @@ pub enum March {
     /// `-march=x86-64-v2` — SSE4.2-era CPUs and newer.
     X86_64V2,
     /// `-march=x86-64-v3` — AVX2-era CPUs and newer.
+    #[default]
     X86_64V3,
     /// `-march=x86-64-v4` — AVX-512-era CPUs and newer.
     X86_64V4,
-}
-
-impl Default for March {
-    fn default() -> Self {
-        // x86-64-v3 is the default OxysOS package baseline.
-        // `Native` opts out of the binhost entirely (see `binhost_url`) and
-        // forces everything to build from source.
-        Self::X86_64V3
-    }
 }
 
 impl March {

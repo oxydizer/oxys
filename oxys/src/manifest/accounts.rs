@@ -31,6 +31,56 @@ pub struct OpenrcServices {
 }
 
 impl OpenrcServices {
+    /// Recommended OxysOS OpenRC runlevel state shared by installer profiles.
+    ///
+    /// Profile-specific services can be layered on top with the delta form of
+    /// [`crate::services!`]. This is intentionally separate from [`Default`],
+    /// which remains empty for manifests that specify no OpenRC policy.
+    pub fn recommended() -> Self {
+        Self {
+            sysinit: strings(&[
+                "cgroups",
+                "devfs",
+                "dmesg",
+                "kmod-static-nodes",
+                "sysfs",
+                "systemd-tmpfiles-setup-dev",
+                "udev",
+                "udev-trigger",
+            ]),
+            boot: strings(&[
+                "binfmt",
+                "bootmisc",
+                "fsck",
+                "hostname",
+                "hwclock",
+                "keymaps",
+                "localmount",
+                "loopback",
+                "modules",
+                "mtab",
+                "procfs",
+                "root",
+                "save-keymaps",
+                "save-termencoding",
+                "seedrng",
+                "swap",
+                "sysctl",
+                "systemd-tmpfiles-setup",
+                "termencoding",
+            ]),
+            default: strings(&[
+                "local",
+                "netmount",
+                "nftables",
+                "modemmanager",
+                "NetworkManager",
+            ]),
+            nonetwork: strings(&["local"]),
+            shutdown: strings(&["killprocs", "mount-ro", "savecache"]),
+        }
+    }
+
     pub fn contains(&self, service: &str) -> bool {
         self.runlevels()
             .any(|(_, services)| services.iter().any(|candidate| candidate == service))
@@ -46,6 +96,10 @@ impl OpenrcServices {
         ]
         .into_iter()
     }
+}
+
+fn strings(values: &[&str]) -> Vec<String> {
+    values.iter().map(|value| (*value).to_owned()).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]

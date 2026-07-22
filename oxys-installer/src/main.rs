@@ -3,9 +3,9 @@ use std::{io, time::Duration};
 use crossterm::{
     event::{self, Event, KeyEventKind},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{prelude::*, Terminal};
+use ratatui::{Terminal, prelude::*};
 
 mod app;
 mod hardware;
@@ -42,9 +42,7 @@ async fn main() -> io::Result<()> {
     result
 }
 
-async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-) -> (io::Result<()>, bool) {
+async fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> (io::Result<()>, bool) {
     let mut app = App::new();
 
     let result = loop {

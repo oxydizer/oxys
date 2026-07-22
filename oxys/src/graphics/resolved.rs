@@ -200,14 +200,13 @@ pub(super) fn build_requirements(
     };
 
     for card in cards {
-        if let Some(artifact) = mesa_artifact_requirement(*card) {
-            if !requirements
+        if let Some(artifact) = mesa_artifact_requirement(*card)
+            && !requirements
                 .mesa_artifacts
                 .iter()
                 .any(|existing| existing.capability == artifact.capability)
-            {
-                requirements.mesa_artifacts.push(artifact);
-            }
+        {
+            requirements.mesa_artifacts.push(artifact);
         }
     }
     for driver in drivers {
@@ -277,12 +276,12 @@ pub(super) fn validate_card_driver_pairs(
     drivers: &[DrmDriver],
 ) -> Result<(), GraphicsResolveError> {
     for card in cards {
-        if let Some(driver) = drm_for_card(*card) {
-            if !drivers.contains(&driver) {
-                return Err(invalid(format!(
-                    "hardware.graphics Mesa card {card:?} requires DRM driver {driver:?}"
-                )));
-            }
+        if let Some(driver) = drm_for_card(*card)
+            && !drivers.contains(&driver)
+        {
+            return Err(invalid(format!(
+                "hardware.graphics Mesa card {card:?} requires DRM driver {driver:?}"
+            )));
         }
     }
     Ok(())

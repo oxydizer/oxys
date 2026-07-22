@@ -628,6 +628,30 @@ When Oxys runs after the user has done a manual `emerge`, it reads VDB to see
 what changed, updates its own receipts to match reality, and moves on. It does
 not try to downgrade or fight Portage's decisions.
 
+### Version holds, not package.provided
+
+A real VDB entry makes Portage treat the package as installed, but when the
+tree carries a newer version, `emerge -uDN @world` would upgrade over the
+Oxys-managed files and strand the receipt. To pin the ceiling, installation
+registers a version hold `>category/PF` in the Oxys-owned fragment
+`/etc/portage/package.mask/oxys`; removal prunes only the lines Oxys added
+(tracked by a `hold_added` receipt field mirroring the world-entry model), and
+deletes the fragment once no holds remain. A pre-existing identical line stays
+user-owned.
+
+`package.provided` was considered and rejected as the registration mechanism.
+It removes the package from dependency calculation entirely: reverse
+dependencies with slot/subslot operators (`:0/1.2=`) or USE-conditional deps
+(`[ssl]`) cannot be satisfied; there is no CONTENTS, so `collision-protect`
+and `qcheck` lose coverage; the package's own RDEPENDs become invisible, so
+`--depclean` may remove libraries it needs at runtime; and it is a static
+config line that goes stale silently. A real VDB entry plus a `>` mask keeps
+every Portage subsystem working and merely pins the version ceiling.
+
+A future upgrade flow must *replace* a package's hold line, never accumulate
+holds: a stale `>category/pkg-old` line would mask a newer Oxys-installed
+version and invite emerge to propose a downgrade.
+
 ### Native Oxys packages
 
 Native `oxys/*` packages also get VDB entries — synthetic but well-formed
@@ -724,8 +748,12 @@ When `oxys` detects that VDB differs from its receipts:
 
 - Package was upgraded by `emerge`: update or remove the Oxys receipt. The
   package is no longer on the `.oxys` fast path unless a matching artifact
-  exists for the new version.
-- Package was removed by `emerge --depclean`: remove the Oxys receipt.
+  exists for the new version. Also prune the now-stale version hold the
+  receipt owned (`hold_added`), since its `>` line refers to the replaced
+  version. (Such an upgrade requires the user to have removed or overridden
+  the hold; reconciliation still cleans up after it.)
+- Package was removed by `emerge --depclean`: remove the Oxys receipt and any
+  version hold it owned.
 - Package was added by `emerge`: ignore it. Oxys only tracks packages it
   installed.
 

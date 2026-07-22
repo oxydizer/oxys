@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 mod accounts;
 mod compiler;
 mod disk;
+mod firewall;
 mod packages;
 mod settings;
 mod swap;
@@ -13,14 +14,17 @@ pub use disk::{
     Disk, DiskPartitions, EfiPartition, Ext4Options, Subvolume, SwapConfig, ZfsCanmount,
     ZfsDataset, ZfsOptions,
 };
+pub use firewall::{
+    Firewall, FirewallPolicy, FirewallValidationError, NFTABLES_PACKAGE, NFTABLES_SERVICE,
+};
 pub(crate) use packages::PlannerManifest;
 pub use packages::{ManifestPackage, Package};
 pub use settings::{
     AudioStack, Bootloader, Compositor, DesktopShell, DiskLayout, DisplayStack, Drm, DrmDriver,
     DrmDrivers, Encryption, Gpu, GpuVendor, Graphics, JournalStorage, Libc, LoginFrontend,
     MakeOpts, MesaGraphics, Nvidia, NvidiaDriver, Password, Power, PrimeMode, SeatBackend, Session,
-    SessionMode, SessionTracker, SessionUser, Shell, SoftwareRenderer, Timezone, Username,
-    VideoCard, VideoCards, VmGraphics,
+    SessionMode, SessionTracker, SessionUser, Shell, SoftwareRenderer, Terminal, Timezone,
+    Username, VideoCard, VideoCards, VmGraphics,
 };
 pub use swap::{
     Compression, DEFAULT_SWAPPINESS, DISK_SWAP_PRIORITY, RamFraction, ResolvedDiskSwap,
@@ -68,6 +72,8 @@ pub struct SystemManifest {
     pub prefer_binary: bool,
     #[serde(default)]
     pub services: Services,
+    #[serde(default)]
+    pub firewall: Firewall,
     #[serde(default)]
     pub users: Vec<User>,
     /// Deserialization-only provenance for the retired `hardware.gpu` field.
@@ -234,6 +240,8 @@ impl<'de> Deserialize<'de> for SystemManifest {
             #[serde(default)]
             services: Services,
             #[serde(default)]
+            firewall: Firewall,
+            #[serde(default)]
             users: Vec<User>,
         }
 
@@ -256,6 +264,7 @@ impl<'de> Deserialize<'de> for SystemManifest {
             session: value.session,
             prefer_binary: value.prefer_binary,
             services: value.services,
+            firewall: value.firewall,
             users: value.users,
             legacy_gpu,
         })
@@ -278,15 +287,11 @@ pub struct Journal {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum InitSystem {
     Systemd,
+    #[default]
     Openrc,
-}
-
-impl Default for InitSystem {
-    fn default() -> Self {
-        Self::Openrc
-    }
 }
 
 #[cfg(test)]

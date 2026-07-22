@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::detect::detect_ram;
+use crate::detect::{detect_ram, system_ram_gib};
 
 use super::{GB, Package, SystemManifest};
 
@@ -15,6 +15,36 @@ pub struct Swap {
     pub strategy: SwapStrategy,
     #[serde(default = "default_swappiness")]
     pub swappiness: u16,
+}
+
+impl Swap {
+    /// Select the recommended swap policy for the detected amount of RAM.
+    pub fn auto() -> Self {
+        Self::auto_for_ram_gib(system_ram_gib())
+    }
+
+    fn auto_for_ram_gib(ram_gib: u64) -> Self {
+        let strategy = match ram_gib {
+            0..=8 => SwapStrategy::Disk {
+                size: SwapSize::MatchRam,
+            },
+            9..=16 => SwapStrategy::Hybrid {
+                zram: ZramOptions::default(),
+                disk: SwapDiskOptions {
+                    size: SwapSize::Fixed(4 * GB),
+                },
+            },
+            _ => SwapStrategy::ZramOnly {
+                algorithm: Compression::Zstd,
+                fraction: RamFraction::HALF,
+            },
+        };
+
+        Self {
+            strategy,
+            swappiness: DEFAULT_SWAPPINESS,
+        }
+    }
 }
 
 impl Default for Swap {
@@ -32,6 +62,7 @@ fn default_swappiness() -> u16 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SwapStrategy {
     Disk {
         size: SwapSize,
@@ -44,13 +75,8 @@ pub enum SwapStrategy {
         algorithm: Compression,
         fraction: RamFraction,
     },
+    #[default]
     Disabled,
-}
-
-impl Default for SwapStrategy {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,7 +118,9 @@ impl Default for ZramOptions {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Compression {
+    #[default]
     Zstd,
     LzoRle,
     Lz4,
@@ -105,12 +133,6 @@ impl Compression {
             Self::LzoRle => "lzo-rle",
             Self::Lz4 => "lz4",
         }
-    }
-}
-
-impl Default for Compression {
-    fn default() -> Self {
-        Self::Zstd
     }
 }
 
@@ -317,24 +339,6 @@ impl SystemManifest {
 mod tests {
     use super::*;
 
-    fn policy_for(gib: u64) -> SwapStrategy {
-        match gib {
-            0..=8 => SwapStrategy::Disk {
-                size: SwapSize::MatchRam,
-            },
-            9..=16 => SwapStrategy::Hybrid {
-                zram: ZramOptions::default(),
-                disk: SwapDiskOptions {
-                    size: SwapSize::Fixed(4 * GB),
-                },
-            },
-            _ => SwapStrategy::ZramOnly {
-                algorithm: Compression::Zstd,
-                fraction: RamFraction::HALF,
-            },
-        }
-    }
-
     #[test]
     fn policy_has_expected_ram_boundaries() {
         for (gib, want_disk, want_zram) in [
@@ -343,14 +347,9 @@ mod tests {
             (16, true, true),
             (17, false, true),
         ] {
-            let resolved = resolve_swap_for_ram(
-                &Swap {
-                    strategy: policy_for(gib),
-                    swappiness: 180,
-                },
-                gib * GB,
-            )
-            .unwrap();
+            let swap = Swap::auto_for_ram_gib(gib);
+            assert_eq!(swap.swappiness, DEFAULT_SWAPPINESS, "{gib} GiB");
+            let resolved = resolve_swap_for_ram(&swap, gib * GB).unwrap();
             assert_eq!(resolved.disk.is_some(), want_disk, "{gib} GiB");
             assert_eq!(resolved.zram.is_some(), want_zram, "{gib} GiB");
         }
@@ -358,15 +357,9 @@ mod tests {
 
     #[test]
     fn hybrid_uses_half_ram_and_prefers_zram() {
-        let resolved = resolve_swap_for_ram(
-            &Swap {
-                strategy: policy_for(16),
-                swappiness: 180,
-            },
-            16 * GB,
-        )
-        .unwrap();
+        let resolved = resolve_swap_for_ram(&Swap::auto_for_ram_gib(16), 16 * GB).unwrap();
         assert_eq!(resolved.zram.as_ref().unwrap().size, 8 * GB);
+        assert_eq!(resolved.zram.as_ref().unwrap().algorithm, Compression::Zstd);
         assert_eq!(resolved.disk.as_ref().unwrap().size, 4 * GB);
         assert!(
             resolved.zram.as_ref().unwrap().priority > resolved.disk.as_ref().unwrap().priority
@@ -393,10 +386,7 @@ mod tests {
 
     #[test]
     fn hybrid_policy_round_trips_through_toml() {
-        let swap = Swap {
-            strategy: policy_for(16),
-            swappiness: 180,
-        };
+        let swap = Swap::auto_for_ram_gib(16);
         let encoded = toml::to_string(&swap).unwrap();
         let decoded: Swap = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded, swap);

@@ -55,6 +55,8 @@ enum Commands {
     Check,
     /// Show the Oxys quick manual
     Help,
+    /// Show a welcome screen with quick commands and documentation links
+    Welcome,
     /// Diff local manifest.toml against /etc/oxys/current-manifest.toml and show the Portage plan
     Diff,
     /// Apply local manifest.toml changes to the running system
@@ -147,6 +149,7 @@ fn main() -> ExitCode {
         Commands::GraphicsBuildPolicy { manifest } => cmd_graphics_build_policy(&manifest),
         Commands::Check => cmd_check(),
         Commands::Help => cmd_help(),
+        Commands::Welcome => cli::welcome::run(),
         Commands::Diff => cmd_diff(),
         Commands::Apply => cli::apply::run(),
         Commands::Update {
@@ -318,8 +321,15 @@ fn print_emerge_event(event: EmergeLine) {
             ),
             None => println!("{} {}", "Progress".yellow().bold(), truncate_line(&line)),
         },
-        EmergeLine::BuildComplete { package } => {
-            println!("{} {}", "Built".green().bold(), package.green());
+        EmergeLine::BuildComplete {
+            package,
+            completed,
+            total,
+        } => {
+            let progress = total
+                .map(|total| format!(" ({completed}/{total})"))
+                .unwrap_or_default();
+            println!("{} {}{}", "Built".green().bold(), package.green(), progress);
         }
         EmergeLine::FetchStart { package } => {
             println!("{} {}", "Fetching".yellow().bold(), package.yellow());
@@ -417,6 +427,16 @@ mod tests {
 
         match cli.command {
             Commands::Help => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn welcome_subcommand_parses() {
+        let cli = Cli::try_parse_from(["oxys", "welcome"]).expect("welcome should parse");
+
+        match cli.command {
+            Commands::Welcome => {}
             other => panic!("unexpected command: {other:?}"),
         }
     }

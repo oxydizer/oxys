@@ -39,8 +39,8 @@ fn explicit_use_flags_that_fight_manifest_policy_are_reported_not_overridden()
     assert!(package_use.contains(&"wayland".to_owned()));
     assert!(package_use.contains(&"pipewire".to_owned()));
 
-    // Each disagreement is surfaced as a hard conflict that names the package,
-    // the explicit flag token, and the manifest field to edit.
+    // Init/audio disagreements are surfaced as hard conflicts. X support is
+    // compatible with a Wayland-first desktop and is intentionally retained.
     let conflicts = &plan.resolution.conflicts;
     let init_conflict = conflicts
         .iter()
@@ -55,9 +55,7 @@ fn explicit_use_flags_that_fight_manifest_policy_are_reported_not_overridden()
             .contains(&"app-admin/example".to_owned())
     );
 
-    assert!(conflicts.iter().any(
-        |conflict| conflict.flag == "X" && conflict.reason.contains("display_stack = wayland")
-    ));
+    assert!(!conflicts.iter().any(|conflict| conflict.flag == "X"));
     assert!(
         conflicts
             .iter()
@@ -322,6 +320,8 @@ fn emerge_chroot_command_uses_target_root_and_binpkg_flags()
             "emerge",
             "--root",
             "/",
+            "--update",
+            "--changed-use",
             "--jobs",
             "2",
             "--getbinpkg",
@@ -407,6 +407,27 @@ fn resolve_latest_version_excludes_live_9999_versions() -> Result<(), Box<dyn st
     let version = resolve_latest_version("gui-wm/niri", &portage_tree)?;
 
     assert_eq!(version, "25.11.0");
+
+    cleanup(&root)?;
+    Ok(())
+}
+
+#[test]
+fn resolve_latest_version_uses_live_version_when_it_is_the_only_choice()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = test_root("only_live_version");
+    let portage_tree = root.join("repo");
+
+    write_md5_cache(
+        &portage_tree,
+        "gui-shells/noctalia",
+        "9999",
+        "IUSE=+jemalloc\nKEYWORDS=\n",
+    )?;
+
+    let version = resolve_latest_version("gui-shells/noctalia", &portage_tree)?;
+
+    assert_eq!(version, "9999");
 
     cleanup(&root)?;
     Ok(())

@@ -40,26 +40,26 @@ pub fn write_portage_plan_config(
     })?;
 
     let package_use_dir = portage_config_dir.join("package.use");
+    let accept_keywords_dir = portage_config_dir.join("package.accept_keywords");
+    let package_license_dir = portage_config_dir.join("package.license");
     ensure_generated_directory(&package_use_dir)?;
+    ensure_generated_directory(&accept_keywords_dir)?;
+    ensure_generated_directory(&package_license_dir)?;
 
     write_generated_file(
         &package_use_dir.join("oxys"),
         &render_package_use(&plan.resolution.package_use),
     )?;
     write_generated_file(
-        &portage_config_dir.join("package.accept_keywords"),
+        &accept_keywords_dir.join("oxys"),
         &render_accept_keywords(&plan.resolution.accept_keywords)?,
     )?;
     write_generated_file(
-        &portage_config_dir.join("package.license"),
+        &package_license_dir.join("oxys"),
         &render_accept_licenses(&plan.resolution.accept_licenses)?,
     )?;
 
-    let make_conf_output = generate_make_conf(
-        &plan.manifest,
-        &plan.resolution.global_use,
-        &plan.resolution.accept_keywords,
-    );
+    let make_conf_output = generate_make_conf(&plan.manifest, &plan.resolution.global_use);
     write_generated_file(
         &portage_config_dir.join("make.conf"),
         &make_conf_output.make_conf,

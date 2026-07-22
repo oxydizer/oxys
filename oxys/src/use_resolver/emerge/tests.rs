@@ -1,32 +1,41 @@
 use std::path::Path;
 
 use super::{
-    EmergeLine, ParserState, emerge_command_for_test, emerge_depclean_pretend_command_for_test,
-    emerge_deselect_command_for_test, emerge_select_command_for_test, parse_emerge_line,
+    EmergeLine, ParserState, emerge_chroot_command_for_test, emerge_command_for_test,
+    emerge_depclean_pretend_command_for_test, emerge_deselect_command_for_test,
+    emerge_select_command_for_test, parse_emerge_line,
 };
 
 #[test]
-fn merge_command_includes_oneshot_when_requested() {
-    let argv = emerge_command_for_test(
-        &["=app-admin/example-1.0.0".to_owned()],
-        Path::new("/"),
-        2,
-        false,
-        true,
-    );
-    assert!(argv.contains(&"--oneshot".to_owned()));
+fn merge_command_oneshot_flag_follows_request() {
+    let atoms = ["=app-admin/example-1.0.0".to_owned()];
+    let with_oneshot = emerge_command_for_test(&atoms, Path::new("/"), 2, false, true);
+    assert!(with_oneshot.contains(&"--oneshot".to_owned()));
+
+    let without_oneshot = emerge_command_for_test(&atoms, Path::new("/"), 2, false, false);
+    assert!(!without_oneshot.contains(&"--oneshot".to_owned()));
 }
 
 #[test]
-fn merge_command_omits_oneshot_when_not_requested() {
-    let argv = emerge_command_for_test(
-        &["=app-admin/example-1.0.0".to_owned()],
-        Path::new("/"),
+fn chroot_merge_command_skips_already_satisfied_packages() {
+    let argv = emerge_chroot_command_for_test(
+        &["=sys-apps/iucode_tool-2.3.1-r2".to_owned()],
+        Path::new("/mnt/target"),
+        Path::new("/var/tmp"),
         2,
-        false,
-        false,
+        true,
     );
-    assert!(!argv.contains(&"--oneshot".to_owned()));
+
+    // --update --changed-use makes emerge skip packages the rsync'd target
+    // already has at the requested version with unchanged effective USE,
+    // instead of unconditionally re-emerging every manifest atom.
+    assert!(argv.contains(&"--update".to_owned()));
+    assert!(argv.contains(&"--changed-use".to_owned()));
+    assert!(argv.contains(&"--getbinpkg".to_owned()));
+    assert_eq!(
+        argv.last(),
+        Some(&"=sys-apps/iucode_tool-2.3.1-r2".to_owned())
+    );
 }
 
 #[test]
@@ -95,6 +104,10 @@ fn parses_build_start_line() {
 #[test]
 fn parses_build_complete_line() {
     let mut state = ParserState::default();
+    let _ = parse_emerge_line(
+        ">>> Emerging (1 of 3) gui-wm/niri-25.11-r1::guru",
+        &mut state,
+    );
 
     let event = parse_emerge_line(
         ">>> Completed installing gui-wm/niri-25.11-r1 into /",
@@ -104,9 +117,44 @@ fn parses_build_complete_line() {
     assert_eq!(
         event,
         EmergeLine::BuildComplete {
-            package: "gui-wm/niri".to_owned()
+            package: "gui-wm/niri".to_owned(),
+            completed: 1,
+            total: Some(3),
         }
     );
+}
+
+#[test]
+fn completed_package_count_advances_independently_of_parallel_start_order() {
+    let mut state = ParserState::default();
+    let _ = parse_emerge_line(">>> Emerging (2 of 3) app-misc/two-1.0", &mut state);
+    let _ = parse_emerge_line(">>> Emerging (1 of 3) app-misc/one-1.0", &mut state);
+
+    let first = parse_emerge_line(
+        ">>> Completed installing app-misc/two-1.0 into /",
+        &mut state,
+    );
+    let second = parse_emerge_line(
+        ">>> Completed installing app-misc/one-1.0 into /",
+        &mut state,
+    );
+
+    assert!(matches!(
+        first,
+        EmergeLine::BuildComplete {
+            completed: 1,
+            total: Some(3),
+            ..
+        }
+    ));
+    assert!(matches!(
+        second,
+        EmergeLine::BuildComplete {
+            completed: 2,
+            total: Some(3),
+            ..
+        }
+    ));
 }
 
 #[test]

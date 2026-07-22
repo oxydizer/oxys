@@ -66,6 +66,15 @@ fn run_step(
         } => {
             crate::runtime::sync_swap_config(resolved_swap, target_mount)?;
         }
+        SystemInstallStep::ConfigureFirewall {
+            manifest,
+            target_mount,
+            ..
+        } => {
+            // Renders and validates the target's rules-save only; the live
+            // host's ruleset is never touched during installation.
+            crate::runtime::sync_firewall_config(manifest, target_mount)?;
+        }
         SystemInstallStep::ResetMachineId { target_mount, .. } => {
             filesystem::reset_machine_id(target_mount)?
         }
@@ -79,6 +88,16 @@ fn run_step(
             target_mount,
             ..
         } => filesystem::write_timezone(timezone, target_mount)?,
+        SystemInstallStep::ConfigureLocale {
+            locale,
+            target_mount,
+            ..
+        } => {
+            filesystem::write_locale(locale, target_mount)?;
+            let target = target_mount.display().to_string();
+            host::run_chroot(&target, &["locale-gen".to_owned()], sender)?;
+            host::run_chroot(&target, &["env-update".to_owned()], sender)?;
+        }
         SystemInstallStep::SetupUsers {
             users,
             target_mount,

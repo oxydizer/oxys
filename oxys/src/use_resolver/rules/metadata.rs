@@ -167,21 +167,6 @@ pub fn collect_metadata_warnings(state: &PackageState, warnings: &mut Vec<Warnin
 }
 
 pub fn collect_local_conflicts(state: &PackageState, conflicts: &mut Vec<Conflict>) {
-    if state.has_flag("wayland")
-        && state.has_flag("X")
-        && state.is_enabled("wayland")
-        && state.is_enabled("X")
-        && state.is_explicit("wayland")
-        && state.is_explicit("X")
-        && !specific_flag_conflict_recorded(conflicts, &state.manifest.package, "wayland", "X")
-    {
-        conflicts.push(Conflict {
-            packages: vec![state.manifest.package.clone()],
-            flag: "X/wayland".to_owned(),
-            reason: "both X and wayland were explicitly enabled".to_owned(),
-        });
-    }
-
     if state.has_flag("systemd")
         && state.has_flag("openrc")
         && state.is_enabled("systemd")

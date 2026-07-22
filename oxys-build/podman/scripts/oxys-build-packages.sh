@@ -23,6 +23,10 @@ KERNEL_ARCH_FRAGMENT_FILE="${SOURCE_ROOT}/podman/kernel/${ARCH_NAME}.fragment"
 if [[ ! -f "${KERNEL_ARCH_FRAGMENT_FILE}" ]]; then
   KERNEL_ARCH_FRAGMENT_FILE="${WORK_ROOT}/kernel/${ARCH_NAME}.fragment"
 fi
+KERNEL_HARDWARE_FRAGMENT_FILE="${SOURCE_ROOT}/podman/kernel/hardware.fragment"
+if [[ ! -f "${KERNEL_HARDWARE_FRAGMENT_FILE}" ]]; then
+  KERNEL_HARDWARE_FRAGMENT_FILE="${WORK_ROOT}/kernel/hardware.fragment"
+fi
 KERNEL_BORE_PATCH_FILE="${SOURCE_ROOT}/podman/kernel/bore.patch"
 if [[ ! -f "${KERNEL_BORE_PATCH_FILE}" ]]; then
   KERNEL_BORE_PATCH_FILE="${WORK_ROOT}/kernel/bore.patch"
@@ -36,7 +40,15 @@ BUILD_ID_FILE="${OUTPUT_ROOT}/${ARCH_NAME}/build-id"
 KERNEL_RELEASE_FILE="${OUTPUT_ROOT}/${ARCH_NAME}/kernel-release"
 KERNEL_ARTIFACTS_FILE="${OUTPUT_ROOT}/${ARCH_NAME}/kernel-artifacts.env"
 
-readonly BINHOST_BASELINE_USE_FLAGS="X wayland dbus systemd -elogind policykit alsa pipewire pulseaudio vulkan opengl gtk jpeg png webp svg fontconfig harfbuzz udev ssl threads unicode"
+# Session flags MUST be "-systemd elogind": every OxysOS consumer (the
+# catalyst ISO build and oxys-generated target make.confs) runs OpenRC with
+# elogind and --binpkg-respect-use=y, so a systemd-flavored binpkg of any
+# package with systemd/elogind in IUSE (pipewire, wireplumber, dbus, polkit,
+# NetworkManager, ...) is rejected and rebuilt from source on every install.
+# Keep the rest of this list in sync with installcd-stage1.spec livecd/use,
+# portage_confdir/make.conf, and BINHOST_BASELINE_COMMON_USE_FLAGS in
+# oxys/src/use_resolver/generate.rs.
+readonly BINHOST_BASELINE_USE_FLAGS="X wayland dbus -systemd elogind policykit alsa pipewire pulseaudio vulkan opengl gtk jpeg png webp svg fontconfig harfbuzz udev ssl threads unicode"
 readonly GLOBAL_USE_FLAGS="${BINHOST_BASELINE_USE_FLAGS} -debug zfs -california -colorado"
 readonly COMMON_FEATURES="parallel-fetch candy"
 readonly ACCEPT_KEYWORDS_VALUE="amd64"
@@ -110,23 +122,43 @@ readonly -a NATIVE_PACKAGES=(
   "gui-shells/noctalia"
   "x11-base/xwayland-satellite"
   "media-video/pipewire"
-  "media-sound/wireplumber"
+  "media-video/wireplumber"
   "gui-apps/waybar"
 )
 
 readonly -a V3_GENERIC_EXTRAS=(
-  "gui-apps/fuzzel"
+  # gui-apps/fuzzel and app-misc/cliphist are GURU-only (not in ::gentoo),
+  # same as gui-wm/niri and x11-base/xwayland-satellite above -- this
+  # container has no GURU repos.conf entry. Left off the binhost for the
+  # same reason: no install-time cost, since the ISO build clones GURU and
+  # builds these itself, and the target then rsyncs + skips the rebuild.
   "gui-apps/mako"
   "gui-apps/foot"
   "app-shells/fish"
   "gui-apps/swaylock"
   "gui-apps/swayidle"
   "gui-apps/swaybg"
+  # Live/target networking: kept in lockstep with installcd-stage1.spec's
+  # "live networking" and "Bluetooth userspace" package blocks, and with
+  # package.use/live-networking's per-package flags below, so the binhost
+  # binpkg matches what --binpkg-respect-use=y expects and isn't rebuilt
+  # from source at ISO/install time.
+  "sys-apps/dbus"
   "net-misc/networkmanager"
-  "gui-apps/cliphist"
+  "net-wireless/wpa_supplicant"
+  "net-wireless/iw"
+  "net-misc/dhcpcd"
+  "net-wireless/bluez"
   "gui-apps/wl-clipboard"
   "sys-auth/polkit"
   "app-admin/sudo"
+  # Manifest packages the target would otherwise source-build at install
+  # time: iucode_tool (intel-microcode BDEPEND, tracked in @world) plus the
+  # toolchain the generated make.conf demands (LDFLAGS=-fuse-ld=mold,
+  # FEATURES=ccache).
+  "sys-apps/iucode_tool"
+  "sys-devel/mold"
+  "dev-util/ccache"
 )
 
 log() {
@@ -261,7 +293,7 @@ MAKEOPTS="${COMMON_MAKEOPTS}"
 FEATURES="${features}"
 USE="${GLOBAL_USE_FLAGS} -dist-kernel"
 ACCEPT_KEYWORDS="${ACCEPT_KEYWORDS_VALUE}"
-EMERGE_DEFAULT_OPTS="--ask=n --verbose --keep-going=y --with-bdeps=y --jobs=1 --load-average=$(build_jobs)"
+EMERGE_DEFAULT_OPTS="--ask=n --verbose --keep-going=y --with-bdeps=y --jobs=1 --load-average=$(build_jobs) --binpkg-respect-use=y"
 PKGDIR="/var/cache/binpkgs"
 PORTAGE_BINHOST_HEADER_URI=""
 ${binhost_line}
@@ -286,9 +318,11 @@ EOF_REPO
 
   cat > /etc/portage/package.use/oxys <<'EOF_USE'
 www-client/firefox pgo wayland
-media-video/pipewire sound-server
+media-video/pipewire sound-server pipewire-alsa
 gui-wm/niri screencast
 gui-shells/noctalia jemalloc
+net-misc/networkmanager wifi tools
+net-wireless/wpa_supplicant dbus
 EOF_USE
 
   cat > /etc/portage/package.accept_keywords/oxys <<'EOF_KEYWORDS'
@@ -297,7 +331,7 @@ gui-shells/noctalia **
 x11-base/xwayland-satellite ~amd64
 gui-apps/waybar ~amd64
 media-video/pipewire ~amd64
-media-sound/wireplumber ~amd64
+media-video/wireplumber ~amd64
 www-client/firefox ~amd64
 EOF_KEYWORDS
 
@@ -323,6 +357,96 @@ sys-fs/zfs-kmod zfs-kmod-no-o3.conf
 EOF_PKGENV
 
   restore_kernel_mask
+}
+
+ensure_binpkg_trust() {
+  [[ "${BUILD_PROFILE}" == "generic" ]] || return 0
+
+  if ! command -v getuto >/dev/null 2>&1; then
+    log "Generic profile requires getuto to initialize Gentoo binpackage trust"
+    exit 1
+  fi
+
+  log "Initializing Gentoo binpackage signing-key trust"
+  getuto
+
+  if [[ ! -s /etc/portage/gnupg/pubring.kbx || \
+        ! -s /etc/portage/gnupg/trustdb.gpg ]]; then
+    log "Gentoo binpackage trust initialization did not create a usable keyring"
+    exit 1
+  fi
+}
+
+# Reuses the ISO build's prefetched git-r3 bare-repo cache (see
+# oxys-iso/scripts/prefetch-git-sources.sh and oxys-iso/git-sources.conf) so
+# live-git ebuilds such as gui-shells/noctalia-9999 don't need a fresh GitHub
+# clone mid-build. build.sh bind-mounts the sibling oxys-iso/ tree read-only
+# at /oxys-iso when present; this is a best-effort optimization, not a hard
+# requirement -- if the mount or cache is missing/stale, affected atoms just
+# fall back to a normal network fetch during their own src_unpack.
+stage_offline_git_sources() {
+  local oxys_iso_mount="/oxys-iso"
+  local sources_file="${oxys_iso_mount}/git-sources.conf"
+  local prefetch_script="${oxys_iso_mount}/scripts/prefetch-git-sources.sh"
+  local cache_ref="refs/heads/oxys-source"
+  local distdir package_env_dir env_dir rows_raw staged=0
+
+  if [[ ! -f "${sources_file}" || ! -x "${prefetch_script}" ]]; then
+    log "No oxys-iso git-source cache mounted; live ebuilds will fetch over the network"
+    return 0
+  fi
+
+  # This runs before the main package queue, so dev-vcs/git (itself one of
+  # the queued atoms) isn't installed yet on the bare stage3 image -- bootstrap
+  # it directly rather than waiting for its normal turn in the queue.
+  if ! command -v git >/dev/null 2>&1; then
+    log "Bootstrapping dev-vcs/git to stage offline Git sources"
+    if ! emerge --oneshot --nodeps --quiet dev-vcs/git >/dev/null 2>&1; then
+      log "Could not bootstrap git; live ebuilds will fetch over the network"
+      return 0
+    fi
+  fi
+
+  # The bind-mounted cache is owned by the host uid, not this container's;
+  # without this, git's ownership safety check makes every operation on it
+  # (even a plain `cat-file -e`) fail silently as "dubious ownership" rather
+  # than a real missing-commit error. oxys-iso/build.sh sets this for the
+  # same reason.
+  git config --system --add safe.directory '*'
+
+  if ! rows_raw="$("${prefetch_script}" --list "${sources_file}")"; then
+    log "WARNING: could not parse ${sources_file}; live ebuilds will fetch over the network"
+    return 0
+  fi
+
+  distdir="$(portageq envvar DISTDIR)"
+  package_env_dir="/etc/portage/package.env"
+  env_dir="/etc/portage/env"
+  mkdir -p "${package_env_dir}" "${env_dir}"
+  cat > "${env_dir}/prefetched-git-source.conf" <<'EOF_ENV'
+EVCS_OFFLINE=1
+EOF_ENV
+  : > "${package_env_dir}/prefetched-git-sources"
+
+  while IFS=$'\t' read -r package_atom store_name _source_uri _source_ref; do
+    local cache_repo="${oxys_iso_mount}/.build/source-cache/git3-src/${store_name}"
+    local git3_repo="${distdir}/git3-src/${store_name}"
+    if ! git --git-dir="${cache_repo}" cat-file -e "${cache_ref}^{commit}" 2>/dev/null; then
+      log "No usable prefetched source for ${package_atom} (${store_name}); it will fetch over the network"
+      continue
+    fi
+    mkdir -p "$(dirname "${git3_repo}")"
+    rm -rf "${git3_repo}"
+    git clone --bare --no-hardlinks "${cache_repo}" "${git3_repo}" >/dev/null
+    chown -R portage:portage "${git3_repo}"
+    printf '%s %s\n' "${package_atom}" "prefetched-git-source.conf" >> "${package_env_dir}/prefetched-git-sources"
+    log "Staged offline Git source for ${package_atom} at ${git3_repo}"
+    ((staged += 1))
+  done <<< "${rows_raw}"
+
+  if (( staged > 0 )); then
+    log "Staged ${staged} offline Git source(s) from the oxys-iso cache"
+  fi
 }
 
 restore_kernel_mask() {
@@ -379,6 +503,41 @@ build_package_queue() {
       printf '%s\n' "${NATIVE_PACKAGES[@]}"
       ;;
     generic)
+      # The v3 repo is the only binhost a v3 target ever queries, so serve the
+      # session/desktop stack here too — otherwise pipewire, wireplumber,
+      # noctalia, etc. have no binpkg at all on v3 and every ISO build and
+      # target update compiles them from source. media-libs/mesa is served
+      # here as well, built under the full VIDEO_CARDS_POLICY (virgl
+      # included): reuse under a narrower/different policy is prevented by
+      # --binpkg-respect-use=y on every consumer, which falls back to a
+      # source build instead of accepting a mismatched binpkg, and
+      # validate_mesa_build_policy checks the installed driver artifacts. One
+      # exception:
+      #   - gui-wm/niri, x11-base/xwayland-satellite: these live in the GURU
+      #     overlay (see oxys-iso/overlay/etc/portage/repos.conf/guru.conf),
+      #     which this container has no repos.conf entry for -- "emerge: there
+      #     are no ebuilds to satisfy" if attempted. The ISO build already
+      #     clones GURU and builds these from source itself; the target then
+      #     gets them via rsync + --update --changed-use skips the rebuild,
+      #     so there's no install-time cost to leaving them off this binhost.
+      #     Wiring GURU into this container (clone + repos.conf + egencache +
+      #     correct ~amd64 keywords) is possible later but untested here.
+      #
+      # NOTE: the Containerfiles FROM gentoo/stage3:amd64-openrc (not
+      # amd64-systemd) specifically so this REAL merge (emerge_package does
+      # not use --buildpkgonly) never has to reconcile the container's own
+      # init packages against the elogind-flavored session stack it's
+      # building. If the desktop USE baseline in BINHOST_BASELINE_USE_FLAGS
+      # ever flips back to systemd, the base image must flip with it.
+      local -a generic_native_excludes=(
+        "gui-wm/niri"
+        "x11-base/xwayland-satellite"
+      )
+      for atom in "${NATIVE_PACKAGES[@]}"; do
+        if ! array_contains "${atom}" "${generic_native_excludes[@]}"; then
+          printf '%s\n' "${atom}"
+        fi
+      done
       printf '%s\n' "${V3_GENERIC_EXTRAS[@]}"
       while IFS= read -r atom; do
         if array_contains "${atom}" "${KERNEL_PACKAGES[@]}"; then
@@ -436,6 +595,7 @@ package_version() {
 copy_kernel_configs_for_archive() {
   mkdir -p "${KERNEL_CONFIG_STAGE_DIR}"
   cp "${KERNEL_BASE_CONFIG_FILE}" "${KERNEL_CONFIG_STAGE_DIR}/base.config"
+  cp "${KERNEL_HARDWARE_FRAGMENT_FILE}" "${KERNEL_CONFIG_STAGE_DIR}/hardware.fragment"
   cp "${KERNEL_ARCH_FRAGMENT_FILE}" "${KERNEL_CONFIG_STAGE_DIR}/${ARCH_NAME}.fragment"
   cp /usr/src/linux/.config "${KERNEL_CONFIG_STAGE_DIR}/merged.config"
 }
@@ -578,8 +738,16 @@ merge_kernel_config() {
     log "Missing arch kernel fragment: ${KERNEL_ARCH_FRAGMENT_FILE}"
     exit 1
   fi
+  if [[ ! -f "${KERNEL_HARDWARE_FRAGMENT_FILE}" ]]; then
+    log "Missing hardware kernel fragment: ${KERNEL_HARDWARE_FRAGMENT_FILE}"
+    exit 1
+  fi
 
-  cat "${KERNEL_BASE_CONFIG_FILE}" "${KERNEL_ARCH_FRAGMENT_FILE}" > "${source_dir}/.config"
+  # hardware.fragment sits between base.config and the arch fragment: it's
+  # the desktop/laptop baseline every image needs regardless of microarch,
+  # but an arch fragment (applied last) can still override an individual
+  # symbol -- e.g. alderlake.fragment forcing CONFIG_DRM_AMDGPU=n.
+  cat "${KERNEL_BASE_CONFIG_FILE}" "${KERNEL_HARDWARE_FRAGMENT_FILE}" "${KERNEL_ARCH_FRAGMENT_FILE}" > "${source_dir}/.config"
 
   # The generated fragment is last so explicit image policy wins over the
   # architecture baseline. olddefconfig resolves dependencies; the assertion
@@ -620,7 +788,8 @@ EOF_GRAPHICS
 assert_boot_critical_kernel_config() {
   local config="/usr/src/linux/.config"
   local missing=() opt
-  for opt in OVERLAY_FS SQUASHFS BLK_DEV_LOOP ISO9660_FS BLK_DEV_DM \
+  for opt in SMP \
+             OVERLAY_FS SQUASHFS BLK_DEV_LOOP ISO9660_FS BLK_DEV_DM \
              SWAP ZRAM ZRAM_BACKEND_ZSTD \
              SCSI BLK_DEV_SD BLK_DEV_SR SATA_AHCI BLK_DEV_NVME USB_STORAGE \
              VFAT_FS EFI EFI_STUB INPUT_EVDEV VIRTIO_INPUT \
@@ -630,11 +799,31 @@ assert_boot_critical_kernel_config() {
              SERIAL_8250 SERIAL_8250_CONSOLE NET_9P NET_9P_VIRTIO 9P_FS; do
     grep -qE "^CONFIG_${opt}=[ym]$" "${config}" || missing+=("CONFIG_${opt}")
   done
+  # Desktop/laptop hardware baseline (kernel/hardware.fragment) -- a kernel
+  # without these boots fine in QEMU but fails the first hour on real
+  # hardware (no firewall, no webcam, no Bluetooth, no touchpad, dead DMIC
+  # audio, no LUKS). This is exactly the class of bug olddefconfig hides
+  # silently (wrong/renamed Kconfig symbol -> dropped, no error) that this
+  # assert exists to catch.
+  for opt in NETFILTER NF_CONNTRACK NF_TABLES NF_TABLES_INET NFT_CT NFT_REJECT NF_NAT \
+             FUSE_FS EXFAT_FS NTFS3_FS \
+             BT BT_HCIBTUSB USB_VIDEO_CLASS MEDIA_SUPPORT \
+             I2C_HID_ACPI HID_MULTITOUCH RTC_CLASS RTC_DRV_CMOS \
+             DM_CRYPT CRYPTO_XTS MEMCG SND_SOC SND_SOC_SOF_TOPLEVEL; do
+    grep -qE "^CONFIG_${opt}=[ym]$" "${config}" || missing+=("CONFIG_${opt}")
+  done
   if (( ${#missing[@]} > 0 )); then
     log "Required boot/live-hardware kernel options missing after olddefconfig: ${missing[*]}"
-    log "Check kernel/base.config (and its Kconfig dependencies) against this kernel version."
+    log "Check kernel/base.config, kernel/hardware.fragment (and their Kconfig dependencies) against this kernel version."
     exit 1
   fi
+  # At least one cpufreq driver must have survived -- a wrong/renamed Kconfig
+  # symbol here (this exact bug shipped: alderlake.fragment requested the
+  # nonexistent CONFIG_INTEL_PSTATE instead of CONFIG_X86_INTEL_PSTATE) is
+  # silently dropped by olddefconfig rather than erroring, leaving a kernel
+  # with no frequency scaling at all.
+  grep -qE '^CONFIG_(X86_INTEL_PSTATE|X86_AMD_PSTATE|X86_ACPI_CPUFREQ)=[ym]$' "${config}" \
+    || { log "No cpufreq driver survived in kernel config (checked X86_INTEL_PSTATE/X86_AMD_PSTATE/X86_ACPI_CPUFREQ)."; exit 1; }
 }
 
 assert_graphics_kernel_config() {
@@ -706,6 +895,7 @@ build_kernel_artifacts() {
   copy_kernel_configs_for_archive
   mkdir -p "${KERNEL_STAGE_ROOT}/usr/src/oxysos"
   cp "${KERNEL_CONFIG_STAGE_DIR}/base.config" "${KERNEL_STAGE_ROOT}/usr/src/oxysos/base.config"
+  cp "${KERNEL_CONFIG_STAGE_DIR}/hardware.fragment" "${KERNEL_STAGE_ROOT}/usr/src/oxysos/hardware.fragment"
   cp "${KERNEL_CONFIG_STAGE_DIR}/${ARCH_NAME}.fragment" "${KERNEL_STAGE_ROOT}/usr/src/oxysos/${ARCH_NAME}.fragment"
   cp "${KERNEL_CONFIG_STAGE_DIR}/merged.config" "${KERNEL_STAGE_ROOT}/usr/src/oxysos/kernel.config"
   {
@@ -807,24 +997,37 @@ ensure_elfutils() {
 }
 
 validate_mesa_build_policy() {
-  local vdb use_flags card flag
+  local vdb card flag artifact
   local -a missing=()
   vdb="$(find /var/db/pkg/media-libs -mindepth 1 -maxdepth 1 -type d -name 'mesa-*' -print 2>/dev/null | sort -V | tail -n 1)"
-  if [[ -z "${vdb}" || ! -f "${vdb}/USE" ]]; then
+  if [[ -z "${vdb}" ]]; then
     log "Mesa policy validation failed: installed Mesa VDB metadata is missing"
     exit 1
   fi
-  use_flags="$(<"${vdb}/USE")"
+
+  # Installed driver artifacts are the capability ground truth. Some policy
+  # names deliberately do not correspond to a Mesa USE flag: amdgpu is a
+  # libdrm/kernel selector whose Mesa userspace driver is radeonsi.
   for card in ${VIDEO_CARDS_POLICY}; do
     flag="video_cards_${card}"
-    [[ " ${use_flags} " == *" ${flag} "* ]] || missing+=("${flag}")
+    case "${card}" in
+      intel) artifact="$(find /usr/lib64 /usr/lib \( -type f -o -type l \) \( -name iris_dri.so -o -name crocus_dri.so \) -print -quit 2>/dev/null || true)" ;;
+      amdgpu|radeonsi) artifact="$(find /usr/lib64 /usr/lib \( -type f -o -type l \) -name radeonsi_dri.so -print -quit 2>/dev/null || true)" ;;
+      radeon) artifact="$(find /usr/lib64 /usr/lib \( -type f -o -type l \) \( -name r600_dri.so -o -name radeon_dri.so \) -print -quit 2>/dev/null || true)" ;;
+      nouveau) artifact="$(find /usr/lib64 /usr/lib \( -type f -o -type l \) -name nouveau_dri.so -print -quit 2>/dev/null || true)" ;;
+      virgl) artifact="$(find /usr/lib64 /usr/lib \( -type f -o -type l \) -name virtio_gpu_dri.so -print -quit 2>/dev/null || true)" ;;
+      vmware) artifact="$(find /usr/lib64 /usr/lib \( -type f -o -type l \) -name vmwgfx_dri.so -print -quit 2>/dev/null || true)" ;;
+      lavapipe) artifact="$(find /usr/lib64 /usr/lib \( -type f -o -type l \) \( -name libvulkan_lvp.so -o -name libvulkan_lvp.so.1 \) -print -quit 2>/dev/null || true)" ;;
+      *) artifact="" ;;
+    esac
+    [[ -n "${artifact}" ]] || missing+=("${flag}")
   done
   if (( ${#missing[@]} > 0 )); then
     log "Installed Mesa does not satisfy graphics build policy: missing ${missing[*]}"
     log "Reject the cached binpackage and rebuild media-libs/mesa from source."
     exit 1
   fi
-  log "Validated installed Mesa USE flags for VIDEO_CARDS='${VIDEO_CARDS_POLICY}'"
+  log "Validated installed Mesa driver artifacts for VIDEO_CARDS='${VIDEO_CARDS_POLICY}'"
 }
 
 run_emerge() {
@@ -1304,6 +1507,8 @@ main() {
   resolve_graphics_policy
   ensure_profile
   write_portage_config
+  ensure_binpkg_trust
+  stage_offline_git_sources
 
   log "Using builder-provided Portage"
   ensure_elfutils

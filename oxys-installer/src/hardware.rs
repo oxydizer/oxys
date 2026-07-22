@@ -1,6 +1,6 @@
 use oxys::{
     detect::{detect_cpu_count, detect_disks, detect_gpu, detect_ram, is_laptop, is_vendor},
-    manifest::{Gpu, GpuVendor, GB},
+    manifest::{GB, Gpu, GpuVendor},
 };
 use tokio::sync::mpsc::UnboundedSender;
 

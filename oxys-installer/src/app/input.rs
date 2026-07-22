@@ -220,6 +220,8 @@ impl App {
                     handle.abort();
                 }
                 self.compiling = false;
+                self.compile_progress = 0;
+                self.compile_started_at = None;
                 self.compile_rx = None;
                 Screen::ConfigSelect
             }
@@ -333,11 +335,10 @@ impl App {
     }
 
     pub(super) fn config_file_path(&self) -> Option<String> {
-        if self.config_idx == 2 {
-            if let Some(path) = &self.custom_config_path {
+        if self.config_idx == 2
+            && let Some(path) = &self.custom_config_path {
                 return Some(path.clone());
             }
-        }
         let name = match self.config_idx {
             0 => "desktop.fe2o3",
             1 => "base.fe2o3",

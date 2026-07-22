@@ -87,12 +87,23 @@ run_image() {
     env_args+=(--env "OXYS_DRM_DRIVERS=${OXYS_DRM_DRIVERS}")
   fi
 
+  local -a git_cache_mount=()
+  if [[ -d "${MONOREPO_ROOT}/oxys-iso" ]]; then
+    # Reuses the ISO build's prefetched git-r3 bare-repo cache (see
+    # oxys-iso/scripts/prefetch-git-sources.sh) so live-git ebuilds like
+    # gui-shells/noctalia-9999 don't need a fresh GitHub clone mid-build --
+    # one flaky DNS lookup shouldn't cost a ~40min from-scratch rebuild.
+    # Read-only; the container clones from this into its own DISTDIR.
+    git_cache_mount=(--volume "${MONOREPO_ROOT}/oxys-iso:/oxys-iso:ro,Z")
+  fi
+
   if ! podman run \
     --rm \
     --privileged \
     "${env_args[@]}" \
     --volume "${REPO_ROOT}:/src:ro,Z" \
     --volume "${OUTPUT_DIR}:/out:Z" \
+    "${git_cache_mount[@]}" \
     "oxys-build:${arch}"; then
     log "Build container failed for ${arch}${profile:+ (${profile})}"
     return 1

@@ -21,13 +21,13 @@ pub use crate::kernel_cmdline::{
 pub use crate::manifest::{
     AudioStack, Bootloader, BuildOptimisation, Compiler, Compositor, Compression, DesktopShell,
     Disk, DiskLayout, DiskPartitions, DisplayStack, Drm, DrmDriver, DrmDrivers, EfiPartition,
-    Encryption, Ext4Options, GB, GIB, Gpu, GpuVendor, Graphics, Hardware, InitSystem, Journal,
-    JournalStorage, Kernel, Libc, LoginFrontend, MB, MakeOpts, March, MesaGraphics, Nvidia,
-    NvidiaDriver, OpenrcServices, Os, Oxys, Package, Password, Power, PrimeMode, RamFraction,
-    SeatBackend, Services, Session, SessionMode, SessionTracker, SessionUser, Shell,
-    SoftwareRenderer, Subvolume, Swap, SwapConfig, SwapDiskOptions, SwapSize, SwapStrategy,
-    Timezone, User, Username, VideoCard, VideoCards, VmGraphics, ZfsCanmount, ZfsDataset,
-    ZfsOptions, ZramOptions,
+    Encryption, Ext4Options, Firewall, FirewallPolicy, GB, GIB, Gpu, GpuVendor, Graphics, Hardware,
+    InitSystem, Journal, JournalStorage, Kernel, Libc, LoginFrontend, MB, MakeOpts, March,
+    MesaGraphics, Nvidia, NvidiaDriver, OpenrcServices, Os, Oxys, Package, Password, Power,
+    PrimeMode, RamFraction, SeatBackend, Services, Session, SessionMode, SessionTracker,
+    SessionUser, Shell, SoftwareRenderer, Subvolume, Swap, SwapConfig, SwapDiskOptions, SwapSize,
+    SwapStrategy, Terminal, Timezone, User, Username, VideoCard, VideoCards, VmGraphics,
+    ZfsCanmount, ZfsDataset, ZfsOptions, ZramOptions,
 };
 pub use crate::session::{
     DecisionSource, ResolvedSession, ResolvedSessionMode, SessionDecision, SessionPolicy,

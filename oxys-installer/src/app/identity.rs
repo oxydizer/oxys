@@ -3,7 +3,7 @@ use oxys::manifest::{Password, User, Username};
 
 use crate::provisioning;
 
-use super::{is_valid_login_name, App, Screen};
+use super::{App, Screen, is_valid_login_name};
 
 impl App {
     /// Kick off interactive collection for everything the compiled manifest

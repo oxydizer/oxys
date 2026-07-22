@@ -91,6 +91,9 @@ pub(crate) fn apply_manifest(desired: SystemManifest) -> Result<()> {
             "Reconciled authoritative OpenRC runlevels".green().bold()
         );
     }
+    if runtime.firewall_configured {
+        reload_firewall(&root)?;
+    }
     if runtime.prime_offload_configured {
         println!(
             "{}",
@@ -116,6 +119,36 @@ pub(crate) fn apply_manifest(desired: SystemManifest) -> Result<()> {
     }
     persist_manifest_value(&effective_desired, &system_manifest_path)?;
     println!("{}", "Apply completed successfully".green().bold());
+    Ok(())
+}
+
+/// Load the freshly written (and already `nft -c`-validated) ruleset into the
+/// running kernel. Only meaningful when applying to the real root: with an
+/// `OXYS_ROOT` override the rules were rendered for another tree and must not
+/// touch this host's kernel.
+fn reload_firewall(root: &Path) -> Result<()> {
+    if root != Path::new("/") {
+        println!(
+            "{}",
+            "Firewall rules rendered (not loaded: applying to a non-/ root)".yellow()
+        );
+        return Ok(());
+    }
+    let rules = Path::new("/").join(oxys::runtime::NFTABLES_RULES_PATH);
+    let output = std::process::Command::new("nft")
+        .arg("-f")
+        .arg(&rules)
+        .output()
+        .map_err(|error| format!("failed to run nft -f {}: {error}", rules.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "nft -f {} failed: {}",
+            rules.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+        .into());
+    }
+    println!("{}", "Reloaded nftables firewall ruleset".green().bold());
     Ok(())
 }
 

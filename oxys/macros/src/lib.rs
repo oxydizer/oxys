@@ -15,10 +15,10 @@
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, ToTokens};
+use quote::{ToTokens, quote};
 use syn::{
-    parse_quote, punctuated::Punctuated, visit_mut::VisitMut, Expr, ExprStruct, ItemFn, Macro,
-    Token,
+    Expr, ExprStruct, ItemFn, Macro, Token, parse_quote, punctuated::Punctuated,
+    visit_mut::VisitMut,
 };
 
 #[proc_macro_attribute]
@@ -65,9 +65,7 @@ impl VisitMut for AutoDefault {
             return;
         }
         expr.dot2_token = Some(Default::default());
-        expr.rest = Some(Box::new(parse_quote!(
-            ::core::default::Default::default()
-        )));
+        expr.rest = Some(Box::new(parse_quote!(::core::default::Default::default())));
     }
 
     fn visit_macro_mut(&mut self, mac: &mut Macro) {
@@ -76,8 +74,7 @@ impl VisitMut for AutoDefault {
         if !mac.path.is_ident("vec") {
             return;
         }
-        let Ok(mut elements) =
-            mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
+        let Ok(mut elements) = mac.parse_body_with(Punctuated::<Expr, Token![,]>::parse_terminated)
         else {
             // e.g. `vec![expr; n]` or anything else we don't understand:
             // leave the tokens exactly as written.
@@ -125,7 +122,11 @@ mod tests {
                 Oxys { os: Os { hostname: "x".into() } }
             }
         });
-        assert_eq!(out.matches(":: core :: default :: Default :: default ()").count(), 2);
+        assert_eq!(
+            out.matches(":: core :: default :: Default :: default ()")
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -147,7 +148,11 @@ mod tests {
             }
         });
         // Only the outer Oxys literal is rewritten, not the enum variant.
-        assert_eq!(out.matches(":: core :: default :: Default :: default ()").count(), 1);
+        assert_eq!(
+            out.matches(":: core :: default :: Default :: default ()")
+                .count(),
+            1
+        );
         assert!(out.contains("LoginFrontend :: OxysLogin { tty : 1 , fallback_tty_login : true }"));
     }
 
@@ -159,7 +164,11 @@ mod tests {
             }
         });
         // Oxys + both Subvolume literals.
-        assert_eq!(out.matches(":: core :: default :: Default :: default ()").count(), 3);
+        assert_eq!(
+            out.matches(":: core :: default :: Default :: default ()")
+                .count(),
+            3
+        );
     }
 
     #[test]
@@ -182,15 +191,27 @@ mod tests {
 
     #[test]
     fn attribute_arguments_are_rejected() {
-        let err = expand(quote!(some_arg), quote!(fn config() -> Oxys { Oxys {} }))
-            .expect_err("arguments should be rejected");
+        let err = expand(
+            quote!(some_arg),
+            quote!(
+                fn config() -> Oxys {
+                    Oxys {}
+                }
+            ),
+        )
+        .expect_err("arguments should be rejected");
         assert!(err.to_string().contains("takes no arguments"));
     }
 
     #[test]
     fn non_function_items_are_rejected() {
-        let err = expand(TokenStream2::new(), quote!(struct NotAFn;))
-            .expect_err("non-fn should be rejected");
+        let err = expand(
+            TokenStream2::new(),
+            quote!(
+                struct NotAFn;
+            ),
+        )
+        .expect_err("non-fn should be rejected");
         assert!(err.to_string().contains("config function"));
     }
 }

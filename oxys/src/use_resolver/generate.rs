@@ -70,11 +70,7 @@ pub use write::{write_portage_config, write_portage_plan_config};
 #[cfg(test)]
 mod tests;
 
-pub fn generate_make_conf(
-    config: &Oxys,
-    global_use: &[String],
-    accept_keywords: &[String],
-) -> MakeConfOutput {
+pub fn generate_make_conf(config: &Oxys, global_use: &[String]) -> MakeConfOutput {
     let mut use_flags = global_use.to_vec();
     if config.compiler.binhost.is_some() {
         use_flags.extend(
@@ -102,14 +98,11 @@ pub fn generate_make_conf(
         BuildOptimisation::Fast | BuildOptimisation::Balanced => {}
     }
 
-    let accept_keywords_value = if accept_keywords
-        .iter()
-        .any(|entry| entry.split_whitespace().any(|token| token == "~amd64"))
-    {
-        "amd64 ~amd64"
-    } else {
-        "amd64"
-    };
+    // Unstable keywords are emitted for individual atoms in
+    // package.accept_keywords. Promoting one package's ~amd64 exception to a
+    // global keyword makes unrelated transitive dependencies jump to testing
+    // versions (for example wayland-scanner 1.25 alongside Wayland 1.24).
+    let accept_keywords_value = "amd64";
 
     let mut features = Vec::new();
     if config.compiler.ccache {
@@ -303,9 +296,9 @@ fn render_accept_keywords(entries: &[String]) -> Result<String, UseResolverError
 
     let mut output = String::from(GENERATED_HEADER);
     for (package, keyword) in normalized {
-        output.push_str(&keyword);
-        output.push(' ');
         output.push_str(&package);
+        output.push(' ');
+        output.push_str(&keyword);
         output.push('\n');
     }
 

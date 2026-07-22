@@ -14,6 +14,8 @@ use super::{DiskError, apply};
 /// needs more than ~8 GiB (see AGENTS.md); refuse below this so wipe never
 /// starts on a disk that will fail mid-copy with ENOSPC.
 pub const MIN_INSTALL_BYTES: u64 = 12 * GB;
+// Tripwire: the install floor must never drop below 12 GiB.
+const _: () = assert!(MIN_INSTALL_BYTES >= 12 * GB);
 
 /// Verify `disk.device` is a real, writable whole-disk candidate that is not
 /// currently mounted, swapped on, held by LVM/RAID/dm, or undersized.
@@ -281,11 +283,6 @@ mod tests {
     fn format_bytes_uses_gib_for_install_floor() {
         assert_eq!(format_bytes(MIN_INSTALL_BYTES), "12.0 GiB");
         assert_eq!(format_bytes(0), "0 B");
-    }
-
-    #[test]
-    fn min_install_bytes_is_at_least_twelve_gib() {
-        assert!(MIN_INSTALL_BYTES >= 12 * GB);
     }
 
     #[test]

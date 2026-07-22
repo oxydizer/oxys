@@ -285,6 +285,95 @@ fn gpu_deserializes_hybrid_gpu_table() {
 }
 
 #[test]
+fn missing_firewall_field_defaults_to_disabled() {
+    // Manifests serialized before the firewall field existed must keep their
+    // behaviour: no firewall.
+    let manifest: SystemManifest = toml::from_str("").expect("default manifest");
+    assert_eq!(manifest.firewall, Firewall::Disabled);
+    assert!(!manifest.firewall.enabled());
+
+    let toml = toml::to_string(&manifest).expect("serialize manifest");
+    assert!(toml.contains("firewall = \"disabled\""), "got: {toml}");
+}
+
+#[test]
+fn firewall_nftables_round_trips_through_toml() {
+    let manifest = SystemManifest {
+        firewall: Firewall::Nftables {
+            incoming: FirewallPolicy::Drop,
+            forwarding: FirewallPolicy::Drop,
+            outgoing: FirewallPolicy::Accept,
+            allow_icmp: true,
+            tcp_ports: vec![22],
+            udp_ports: vec![],
+        },
+        ..SystemManifest::default()
+    };
+
+    let toml = toml::to_string(&manifest).expect("serialize manifest");
+    assert!(toml.contains("[firewall.nftables]"), "got: {toml}");
+    assert!(toml.contains("incoming = \"drop\""), "got: {toml}");
+    assert!(toml.contains("outgoing = \"accept\""), "got: {toml}");
+    assert!(toml.contains("tcp_ports = [22]"), "got: {toml}");
+    let parsed: SystemManifest = toml::from_str(&toml).expect("deserialize manifest");
+    assert_eq!(parsed.firewall, manifest.firewall);
+}
+
+#[test]
+fn firewall_validation_covers_ports_package_service_and_init() {
+    let firewall = Firewall::Nftables {
+        incoming: FirewallPolicy::Drop,
+        forwarding: FirewallPolicy::Drop,
+        outgoing: FirewallPolicy::Accept,
+        allow_icmp: true,
+        tcp_ports: vec![22],
+        udp_ports: vec![0],
+    };
+    assert_eq!(
+        firewall.validate(),
+        Err(FirewallValidationError::ZeroPort { protocol: "udp" })
+    );
+
+    let mut manifest = SystemManifest {
+        firewall: Firewall::Nftables {
+            incoming: FirewallPolicy::Drop,
+            forwarding: FirewallPolicy::Drop,
+            outgoing: FirewallPolicy::Accept,
+            allow_icmp: true,
+            tcp_ports: vec![],
+            udp_ports: vec![],
+        },
+        ..SystemManifest::default()
+    };
+    assert_eq!(
+        manifest.validate_firewall(),
+        Err(FirewallValidationError::MissingPackage)
+    );
+    manifest.packages.push(Package::new(NFTABLES_PACKAGE));
+    assert_eq!(
+        manifest.validate_firewall(),
+        Err(FirewallValidationError::MissingService)
+    );
+    manifest
+        .services
+        .openrc
+        .default
+        .push(NFTABLES_SERVICE.to_owned());
+    assert_eq!(manifest.validate_firewall(), Ok(()));
+
+    manifest.init_system = InitSystem::Systemd;
+    assert_eq!(
+        manifest.validate_firewall(),
+        Err(FirewallValidationError::UnsupportedInit(
+            InitSystem::Systemd
+        ))
+    );
+
+    // A disabled firewall never demands the package or service.
+    assert_eq!(SystemManifest::default().validate_firewall(), Ok(()));
+}
+
+#[test]
 fn session_rust_dsl_round_trips_through_toml() {
     let manifest = SystemManifest {
         session: Session {

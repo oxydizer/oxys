@@ -180,13 +180,10 @@ impl ProcessStream {
                 program: program.clone(),
                 stream: "stdout",
             })?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ExecError::PipeUnavailable {
-                program,
-                stream: "stderr",
-            })?;
+        let stderr = child.stderr.take().ok_or(ExecError::PipeUnavailable {
+            program,
+            stream: "stderr",
+        })?;
 
         let (sender, receiver) = mpsc::channel();
         let reader_threads = vec![

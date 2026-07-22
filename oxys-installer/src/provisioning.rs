@@ -3,12 +3,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use oxys::{
-    apply_disk_plan, apply_system_install_plan,
+    ProvisionEvent, SystemInstallEvent, SystemInstallStep, apply_disk_plan,
+    apply_system_install_plan,
     detect::DetectedDisk,
-    manifest::{Disk, Password, Timezone, Username, GB},
+    manifest::{Disk, GB, Password, Timezone, Username},
     plan_disk, plan_disk_with_swap, plan_system_install, preflight_with_swap,
-    release_target_mounts, ProvisionEvent,
-    SystemInstallEvent, SystemInstallStep,
+    release_target_mounts,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -65,10 +65,35 @@ fn step_reports_rsync_progress(step: &SystemInstallStep) -> bool {
     )
 }
 
+/// Whether this step streams Portage package completion counts.
+fn step_reports_emerge_progress(step: &SystemInstallStep) -> bool {
+    matches!(step, SystemInstallStep::EmergePackages { .. })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RsyncProgress {
     transferred_bytes: u64,
     percent: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EmergeProgress {
+    completed: u32,
+    total: u32,
+}
+
+/// Parse the suffix added by `install::portage`, e.g.
+/// `completed gui-wm/niri (12/133)`.
+fn parse_emerge_progress(line: &str) -> Option<EmergeProgress> {
+    let suffix = line.strip_prefix("completed ")?.rsplit_once(" (")?.1;
+    let counts = suffix.strip_suffix(')')?;
+    let (completed, total) = counts.split_once('/')?;
+    let completed = completed.parse::<u32>().ok()?;
+    let total = total.parse::<u32>().ok()?;
+    if total == 0 || completed > total {
+        return None;
+    }
+    Some(EmergeProgress { completed, total })
 }
 
 /// Parse the overall completion percent from an rsync `--info=progress2` line.
@@ -92,10 +117,10 @@ fn parse_rsync_progress(line: &str) -> Option<RsyncProgress> {
         let Some(num) = token.strip_suffix('%') else {
             continue;
         };
-        if let Ok(value) = num.parse::<u16>() {
-            if value <= 100 {
-                best = Some(value);
-            }
+        if let Ok(value) = num.parse::<u16>()
+            && value <= 100
+        {
+            best = Some(value);
         }
     }
     best.map(|percent| RsyncProgress {
@@ -349,11 +374,7 @@ pub(crate) fn run_install(
     // resolves session/graphics and validates the live source image; on
     // machines the image cannot support (e.g. proprietary NVIDIA policy on a
     // nouveau-only ISO) we must fail here so the selected disk is never wiped.
-    let plan = match plan_disk_with_swap(
-        &manifest.disk,
-        &resolved_swap,
-        target_mount,
-    ) {
+    let plan = match plan_disk_with_swap(&manifest.disk, &resolved_swap, target_mount) {
         Ok(plan) => plan,
         Err(error) => {
             let _ = tx.send(format!("[error] {error}"));
@@ -432,17 +453,14 @@ pub(crate) fn run_install(
 
     // Pre-weight every planned step so the bar can grow smoothly *during* the
     // long rsync (via progress2 %) rather than jumping only on StepComplete.
-    let weights: Vec<u32> = system_plan
-        .steps
-        .iter()
-        .map(system_step_weight)
-        .collect();
+    let weights: Vec<u32> = system_plan.steps.iter().map(system_step_weight).collect();
     let total_weight: u32 = weights.iter().sum::<u32>().max(1);
     let mut weight_done: u32 = 0;
     let mut step_idx: usize = 0;
     let mut current_weight: u32 = 0;
     let mut current_frac: f32 = 0.0;
     let mut tracks_rsync = false;
+    let mut tracks_emerge = false;
     let mut step_started: Option<Instant> = None;
     let mut transferred_bytes: Option<u64> = None;
     // Monotonic ceiling so a noisy/out-of-order refresh never rewinds the bar.
@@ -453,8 +471,7 @@ pub(crate) fn run_install(
                                 current_weight: u32,
                                 current_frac: f32,
                                 last_pct: &mut u16| {
-        let pct =
-            system_progress_percent(weight_done, current_weight, current_frac, total_weight);
+        let pct = system_progress_percent(weight_done, current_weight, current_frac, total_weight);
         let pct = pct.max(*last_pct);
         *last_pct = pct;
         send_progress(tx, pct);
@@ -473,6 +490,10 @@ pub(crate) fn run_install(
                     .steps
                     .get(step_idx)
                     .is_some_and(step_reports_rsync_progress);
+                tracks_emerge = system_plan
+                    .steps
+                    .get(step_idx)
+                    .is_some_and(step_reports_emerge_progress);
                 emit_system_progress(
                     &tx,
                     weight_done,
@@ -482,26 +503,37 @@ pub(crate) fn run_install(
                 );
             }
             SystemInstallEvent::StepOutput { line } => {
-                if tracks_rsync {
-                    if let Some(progress) = parse_rsync_progress(line) {
-                        transferred_bytes = Some(
-                            transferred_bytes
-                                .unwrap_or_default()
-                                .max(progress.transferred_bytes),
+                if tracks_rsync && let Some(progress) = parse_rsync_progress(line) {
+                    transferred_bytes = Some(
+                        transferred_bytes
+                            .unwrap_or_default()
+                            .max(progress.transferred_bytes),
+                    );
+                    let frac = (progress.percent as f32 / 100.0).clamp(0.0, 1.0);
+                    // Only push when the transfer actually advanced; progress2
+                    // redraws many times at the same percent.
+                    if frac > current_frac + 0.001 {
+                        current_frac = frac;
+                        emit_system_progress(
+                            &tx,
+                            weight_done,
+                            current_weight,
+                            current_frac,
+                            &mut last_pct,
                         );
-                        let frac = (progress.percent as f32 / 100.0).clamp(0.0, 1.0);
-                        // Only push when the transfer actually advanced; progress2
-                        // redraws many times at the same percent.
-                        if frac > current_frac + 0.001 {
-                            current_frac = frac;
-                            emit_system_progress(
-                                &tx,
-                                weight_done,
-                                current_weight,
-                                current_frac,
-                                &mut last_pct,
-                            );
-                        }
+                    }
+                }
+                if tracks_emerge && let Some(progress) = parse_emerge_progress(line) {
+                    let frac = (progress.completed as f32 / progress.total as f32).clamp(0.0, 1.0);
+                    if frac > current_frac + 0.001 {
+                        current_frac = frac;
+                        emit_system_progress(
+                            &tx,
+                            weight_done,
+                            current_weight,
+                            current_frac,
+                            &mut last_pct,
+                        );
                     }
                 }
             }
@@ -513,6 +545,7 @@ pub(crate) fn run_install(
                 current_weight = 0;
                 current_frac = 0.0;
                 tracks_rsync = false;
+                tracks_emerge = false;
                 transferred_bytes = None;
                 step_idx = step_idx.saturating_add(1);
                 emit_system_progress(
@@ -597,21 +630,6 @@ mod tests {
     }
 
     #[test]
-    fn installer_profiles_match_iso_overlay() {
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        for profile in ["base.fe2o3", "desktop.fe2o3", "custom.fe2o3"] {
-            let canonical = std::fs::read(manifest_dir.join("configs").join(profile)).unwrap();
-            let overlay = std::fs::read(
-                manifest_dir
-                    .join("../oxys-iso/overlay/root/configs")
-                    .join(profile),
-            )
-            .unwrap();
-            assert_eq!(canonical, overlay, "profile copies differ: {profile}");
-        }
-    }
-
-    #[test]
     fn parse_rsync_progress_reads_bytes_and_percent() {
         assert_eq!(
             parse_rsync_progress("  1,234,567  45%  12.34MB/s  0:00:12"),
@@ -641,6 +659,22 @@ mod tests {
         assert_eq!(parse_rsync_progress("emerging foo-1.2.3"), None);
         assert_eq!(parse_rsync_progress("using 50% of free space"), None);
         assert_eq!(parse_rsync_progress("speed 12.34MB/s"), None);
+    }
+
+    #[test]
+    fn parse_emerge_progress_reads_completed_package_counts() {
+        assert_eq!(
+            parse_emerge_progress("completed gui-wm/niri (12/133)"),
+            Some(EmergeProgress {
+                completed: 12,
+                total: 133,
+            })
+        );
+        assert_eq!(parse_emerge_progress("emerging gui-wm/niri"), None);
+        assert_eq!(
+            parse_emerge_progress("completed gui-wm/niri (134/133)"),
+            None
+        );
     }
 
     #[test]

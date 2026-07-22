@@ -34,10 +34,10 @@ fn is_effectively_root() -> bool {
     {
         if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
             for line in status.lines() {
-                if let Some(rest) = line.strip_prefix("Uid:") {
-                    if let Some(euid) = rest.split_whitespace().nth(1) {
-                        return euid == "0";
-                    }
+                if let Some(rest) = line.strip_prefix("Uid:")
+                    && let Some(euid) = rest.split_whitespace().nth(1)
+                {
+                    return euid == "0";
                 }
             }
         }
@@ -155,10 +155,10 @@ where
                         }
                         let line = String::from_utf8_lossy(&chunk).into_owned();
                         chunk.clear();
-                        if let Some(msg) = map_fn(Ok(line)) {
-                            if sender.send(msg).is_err() {
-                                return;
-                            }
+                        if let Some(msg) = map_fn(Ok(line))
+                            && sender.send(msg).is_err()
+                        {
+                            return;
                         }
                     } else {
                         chunk.push(byte[0]);

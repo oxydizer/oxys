@@ -7,7 +7,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::App,
+    app::{App, format_install_elapsed},
     provisioning::{self, TARGET_MOUNT},
 };
 
@@ -16,7 +16,7 @@ use super::{
         draw_action_row, draw_focal_panel, draw_simple_scrollbar, highlight_toml_line, kv_line,
         rule_line, section_header, status_line, style_log_line, wrap_text,
     },
-    theme::{ACCENT, DIM, FAINT, FG, FILL, SPINNER, SUCCESS, WARN},
+    theme::{ACCENT, ASCII_SPINNER, DIM, FAINT, FG, FILL, SPINNER, SUCCESS, WARN},
 };
 
 mod config;

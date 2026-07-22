@@ -10,45 +10,35 @@ use std::fmt;
 /// example OpenRC with systemd-boot, or systemd with GRUB).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Bootloader {
     SystemdBoot,
+    #[default]
     Grub,
 }
 
-impl Default for Bootloader {
-    fn default() -> Self {
-        Self::Grub
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Libc {
+    #[default]
     Glibc,
 }
 
-impl Default for Libc {
-    fn default() -> Self {
-        Self::Glibc
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DisplayStack {
+    #[default]
     Wayland,
     X11,
 }
 
-impl Default for DisplayStack {
-    fn default() -> Self {
-        Self::Wayland
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AudioStack {
+    #[default]
     Pipewire,
     Pulseaudio,
 }
@@ -61,6 +51,7 @@ pub struct Session {
     pub login: LoginFrontend,
     pub compositor: Compositor,
     pub desktop_shell: Option<DesktopShell>,
+    pub terminal: Terminal,
     pub seat: SeatBackend,
     pub session_tracker: SessionTracker,
 }
@@ -73,6 +64,7 @@ impl Default for Session {
             login: LoginFrontend::default(),
             compositor: Compositor::Niri,
             desktop_shell: None,
+            terminal: Terminal::default(),
             seat: SeatBackend::Auto,
             session_tracker: SessionTracker::Auto,
         }
@@ -126,6 +118,50 @@ pub enum DesktopShell {
     Noctalia,
 }
 
+/// Terminal emulator used by generated graphical-session shortcuts and the
+/// first-login welcome TUI. Each variant carries a known-safe invocation and
+/// its Gentoo package atom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Terminal {
+    #[default]
+    Foot,
+    Alacritty,
+    Kitty,
+    Wezterm,
+}
+
+impl Terminal {
+    pub fn executable(self) -> &'static str {
+        match self {
+            Self::Foot => "foot",
+            Self::Alacritty => "alacritty",
+            Self::Kitty => "kitty",
+            Self::Wezterm => "wezterm",
+        }
+    }
+
+    pub fn package(self) -> &'static str {
+        match self {
+            Self::Foot => "gui-apps/foot",
+            Self::Alacritty => "x11-terms/alacritty",
+            Self::Kitty => "x11-terms/kitty",
+            Self::Wezterm => "x11-terms/wezterm",
+        }
+    }
+
+    pub(crate) fn welcome_command(self) -> &'static str {
+        match self {
+            Self::Foot => {
+                "foot --app-id=oxys-welcome --window-size-chars=100x32 -e /usr/bin/oxys welcome"
+            }
+            Self::Alacritty => "alacritty --class oxys-welcome -e /usr/bin/oxys welcome",
+            Self::Kitty => "kitty --class oxys-welcome /usr/bin/oxys welcome",
+            Self::Wezterm => "wezterm start --class oxys-welcome -- /usr/bin/oxys welcome",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeatBackend {
@@ -147,24 +183,14 @@ pub enum SessionTracker {
     None,
 }
 
-impl Default for AudioStack {
-    fn default() -> Self {
-        Self::Pipewire
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Shell {
+    #[default]
     Bash,
     Zsh,
     Fish,
-}
-
-impl Default for Shell {
-    fn default() -> Self {
-        Self::Bash
-    }
 }
 
 impl Shell {
@@ -180,34 +206,26 @@ impl Shell {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DiskLayout {
     Btrfs,
     LuksBtrfs,
     Zfs,
+    #[default]
     Ext4,
-}
-
-impl Default for DiskLayout {
-    fn default() -> Self {
-        Self::Ext4
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Encryption {
     /// TPM-backed unlock. Planned, not provisioned yet.
     Tpm,
     /// Passphrase-backed LUKS unlock. Planned, not provisioned yet.
     Password,
     /// No disk encryption.
+    #[default]
     None,
-}
-
-impl Default for Encryption {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -218,22 +236,20 @@ pub enum GpuVendor {
     Nvidia,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Gpu {
+    #[default]
     Auto,
     Single(GpuVendor),
-    Hybrid { igpu: GpuVendor, dgpu: GpuVendor },
+    Hybrid {
+        igpu: GpuVendor,
+        dgpu: GpuVendor,
+    },
 }
 
 impl Gpu {
     pub fn prime_offloading_enabled(&self) -> bool {
         matches!(self, Self::Hybrid { .. })
-    }
-}
-
-impl Default for Gpu {
-    fn default() -> Self {
-        Self::Auto
     }
 }
 
@@ -490,50 +506,40 @@ impl From<Gpu> for Graphics {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum MakeOpts {
+    #[default]
     Auto,
     Jobs(usize),
 }
 
-impl Default for MakeOpts {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Power {
+    #[default]
     Auto,
     None,
     Tlp,
     AsusCtl,
 }
 
-impl Default for Power {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum JournalStorage {
     Auto,
+    #[default]
     Persistent,
     Volatile,
 }
 
-impl Default for JournalStorage {
-    fn default() -> Self {
-        Self::Persistent
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Password {
     /// No password set; the account is created locked.
+    #[default]
     None,
     /// Plaintext password baked into the config. Convenient but the value is
     /// stored verbatim in `manifest.toml`, so a compile-time warning is
@@ -545,12 +551,6 @@ pub enum Password {
     /// Collected interactively by the installer at install time. The secret is
     /// never written to the config or to `manifest.toml`.
     Prompt,
-}
-
-impl Default for Password {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -112,6 +112,11 @@ else
 	TREEISH="${TREEISH%.sqfs}"
 	echo ">> auto-resolved snapshot treeish: ${TREEISH} (from ${LATEST_SNAPSHOT})"
 fi
+GENTOO_SNAPSHOT="${STOREDIR}/snapshots/gentoo-${TREEISH}.sqfs"
+if [[ ! -f "${GENTOO_SNAPSHOT}" ]]; then
+	echo "ERROR: selected Gentoo snapshot is missing: ${GENTOO_SNAPSHOT}" >&2
+	exit 1
+fi
 
 # Which oxys-build arch output to pull the prebuilt kernel+zfs-kmod from.
 # Required, no default: this is a hardware-targeted kernel build, and
@@ -149,6 +154,59 @@ if ! command -v catalyst >/dev/null 2>&1; then
 	echo "           docker.io/gentoo/stage3:amd64-openrc bash" >&2
 	exit 1
 fi
+
+# stage2 passes `--compressor xz` to gensquashfs. Gentoo calls this codec's
+# squashfs-tools-ng USE flag `lzma`, not `xz` (the ebuild maps it to
+# --with-xz). Verify the image's VDB up front so an old or locally modified
+# Catalyst image fails before the expensive stage1 build has completed.
+SQUASHFS_TOOLS_NG_VDB="$(find /var/db/pkg/sys-fs -mindepth 1 -maxdepth 1 \
+	-type d -name 'squashfs-tools-ng-*' -print -quit 2>/dev/null || true)"
+if ! command -v gensquashfs >/dev/null 2>&1 \
+	|| ! command -v rdsquashfs >/dev/null 2>&1 \
+	|| [[ -z "${SQUASHFS_TOOLS_NG_VDB}" ]] \
+	|| ! grep -qw lzma "${SQUASHFS_TOOLS_NG_VDB}/USE" 2>/dev/null; then
+	echo "ERROR: the Catalyst image lacks XZ-capable gensquashfs/rdsquashfs tools." >&2
+	echo "       Exit the container and rebuild it through the host wrapper:" >&2
+	echo "         OXYS_REBUILD=1 OXYS_ARCH=<arch> ./oxys-iso/scripts/enter-container.sh build" >&2
+	exit 1
+fi
+
+# Check the actual codec path too; a VDB flag alone does not prove the binary
+# can create and read an XZ image. This takes milliseconds and catches a
+# stale/broken container before catalyst starts either expensive stage.
+SQUASHFS_PROBE_DIR="$(mktemp -d /tmp/oxys-squashfs-probe.XXXXXX)"
+mkdir -p "${SQUASHFS_PROBE_DIR}/input"
+printf 'xz probe\n' > "${SQUASHFS_PROBE_DIR}/input/probe"
+if ! gensquashfs --quiet --compressor xz \
+	--pack-dir "${SQUASHFS_PROBE_DIR}/input" "${SQUASHFS_PROBE_DIR}/probe.squashfs" \
+	|| ! rdsquashfs --cat /probe "${SQUASHFS_PROBE_DIR}/probe.squashfs" \
+		| grep -qx 'xz probe'; then
+	rm -rf "${SQUASHFS_PROBE_DIR}"
+	echo "ERROR: gensquashfs/rdsquashfs failed the XZ codec smoke test." >&2
+	exit 1
+fi
+rm -rf "${SQUASHFS_PROBE_DIR}"
+echo ">> verified Catalyst XZ SquashFS tooling"
+
+# The snapshot is both Catalyst's build repository and the repository payload
+# preserved for the live/installed system. Reject a corrupt or wrongly rooted
+# image before spending time on stage1.
+if ! rdsquashfs --stat /metadata/md5-cache \
+		"${GENTOO_SNAPSHOT}" >/dev/null \
+	|| ! rdsquashfs --stat /metadata/md5-cache/sys-apps \
+		"${GENTOO_SNAPSHOT}" >/dev/null \
+	|| ! rdsquashfs --stat /profiles/categories \
+		"${GENTOO_SNAPSHOT}" >/dev/null; then
+	echo "ERROR: selected Gentoo snapshot has no metadata/md5-cache: ${GENTOO_SNAPSHOT}" >&2
+	exit 1
+fi
+if ! snapshot_repo_name="$(rdsquashfs --cat \
+	/profiles/repo_name "${GENTOO_SNAPSHOT}")" \
+	|| [[ "${snapshot_repo_name}" != gentoo ]]; then
+	echo "ERROR: selected Gentoo snapshot has an invalid repository identity: ${GENTOO_SNAPSHOT}" >&2
+	exit 1
+fi
+echo ">> verified selected Gentoo repository snapshot"
 
 # --- refresh installer when Rust tooling is available -----------------------
 # The usual host wrapper (scripts/enter-container.sh build) always runs this
@@ -343,6 +401,15 @@ if (( git_source_count == 0 )); then
 	exit 1
 fi
 echo ">> staged ${git_source_count} offline Git source(s) for catalyst"
+
+# REPO_DIR is bind-mounted with host ownership (uid 1000), so the `cp -a`
+# above preserved that on GENERATED_PORTAGE_CONFDIR. catalyst's portage_confdir
+# key rsyncs these files into /etc/portage on BOTH stage1 and stage2 verbatim
+# (no chown), so package.use/mask/accept_keywords/license/env would otherwise
+# ship owned by uid 1000 -- letting the installed system's first user (normally
+# also uid 1000, since the installer preserves numeric IDs) own its own Portage
+# policy. Same trap as OVERLAY_DIR below; normalize here too.
+chown -R 0:0 "${GENERATED_PORTAGE_CONFDIR}"
 
 KERNEL_CACHE_DIR="${DISTDIR}/oxys-kernel-cache"
 mkdir -p "${KERNEL_CACHE_DIR}"
@@ -557,10 +624,66 @@ if [[ "${OXYS_STAGE1_ONLY:-}" == "1" ]]; then
 	echo ">> OXYS_STAGE1_ONLY=1: stopping after livecd-stage1 (no ISO produced)."
 	exit 0
 fi
+
 echo ">> livecd-stage2"
 catalyst -af "${WORK}/stage2.spec"
 
 BUILT_ISO="${BUILDS_DIR}/oxysos-amd64-${TIMESTAMP}.iso"
+discard_rejected_iso() {
+	rm -f "${BUILT_ISO}" "${BUILT_ISO}.CONTENTS.gz" \
+		"${BUILT_ISO}.DIGESTS" "${BUILT_ISO}.sha256"
+}
+# fsscript runs before Catalyst's final repository cleanup, so checking the
+# chroot there alone cannot prove the tree reached the image. Inspect the
+# finished SquashFS with the same XZ-capable tools used to create it.
+BUILT_SQUASHFS="${BUILDS_DIR}/livecd-stage2-amd64-${TIMESTAMP}/image.squashfs"
+if [[ ! -s "${BUILT_SQUASHFS}" ]]; then
+	discard_rejected_iso
+	echo "ERROR: build finished but the live SquashFS is missing or empty: ${BUILT_SQUASHFS}" >&2
+	exit 1
+fi
+if ! rdsquashfs --stat /var/db/repos/.oxys-repositories/gentoo/metadata/md5-cache \
+		"${BUILT_SQUASHFS}" >/dev/null \
+	|| ! rdsquashfs --stat /var/db/repos/.oxys-repositories/gentoo/metadata/md5-cache/sys-apps \
+		"${BUILT_SQUASHFS}" >/dev/null \
+	|| ! rdsquashfs --stat /var/db/repos/.oxys-repositories/gentoo/profiles/categories \
+		"${BUILT_SQUASHFS}" >/dev/null; then
+	discard_rejected_iso
+	echo "ERROR: finished live SquashFS has no preserved Gentoo md5-cache." >&2
+	exit 1
+fi
+if ! squashfs_repo_name="$(rdsquashfs --cat \
+	/var/db/repos/.oxys-repositories/gentoo/profiles/repo_name "${BUILT_SQUASHFS}")"; then
+	discard_rejected_iso
+	echo "ERROR: finished live SquashFS has no readable Gentoo repository identity." >&2
+	exit 1
+fi
+if [[ "${squashfs_repo_name}" != gentoo ]]; then
+	discard_rejected_iso
+	echo "ERROR: finished live SquashFS has an invalid Gentoo repository identity." >&2
+	exit 1
+fi
+for overlay_cache in \
+	/var/db/repos/guru/metadata/md5-cache/gui-wm \
+	/var/db/repos/guru/metadata/md5-cache/gui-apps \
+	/var/db/repos/oxys/metadata/md5-cache/app-admin \
+	/var/db/repos/oxys/metadata/md5-cache/gui-shells; do
+	if ! rdsquashfs --stat "${overlay_cache}" "${BUILT_SQUASHFS}" >/dev/null; then
+		discard_rejected_iso
+		echo "ERROR: finished live SquashFS has no installer metadata at ${overlay_cache}." >&2
+		exit 1
+	fi
+done
+if ! rdsquashfs --stat /etc/init.d/oxys-gentoo-repo \
+	"${BUILT_SQUASHFS}" >/dev/null \
+	|| ! rdsquashfs --stat /etc/runlevels/boot/oxys-gentoo-repo \
+		"${BUILT_SQUASHFS}" >/dev/null; then
+	discard_rejected_iso
+	echo "ERROR: finished live SquashFS cannot activate its preserved Gentoo repository." >&2
+	exit 1
+fi
+echo ">> verified preserved Gentoo repository and boot activation inside image.squashfs"
+
 if [[ -f "${BUILT_ISO}" ]]; then
 	echo ">> Done. ISO: ${BUILT_ISO} ($(stat -c%s "${BUILT_ISO}") bytes)"
 	echo "   (this is now the only oxysos-*.iso here, so run-qemu.sh will boot it)"

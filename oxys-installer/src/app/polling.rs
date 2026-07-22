@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::{
@@ -6,7 +8,7 @@ use crate::{
     ui::theme::{ASCII_SPINNER, SPINNER},
 };
 
-use super::{append_install_log, is_rsync_progress, App, CompileEvent, Screen};
+use super::{App, CompileEvent, Screen, append_install_log, is_rsync_progress};
 
 impl App {
     pub(crate) fn poll_streams(&mut self) {
@@ -103,6 +105,10 @@ impl App {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         self.install_rx = None;
+                        self.install_elapsed = self
+                            .install_started_at
+                            .take()
+                            .map(|started_at| started_at.elapsed());
                         // Only advance to the "done" (success) screen on a clean
                         // run. If any step emitted an `[error]` line the install did
                         // NOT complete, so stay on the install screen: draw_install
@@ -133,9 +139,11 @@ impl App {
             match rx.try_recv() {
                 Ok(CompileEvent::Done(result)) => {
                     self.compiling = false;
+                    self.compile_started_at = None;
                     self.compile_rx = None;
                     match result {
                         Ok(outcome) => {
+                            self.compile_progress = 100;
                             self.compile_notices = outcome.notices;
                             self.accept_compiled_manifest(outcome.manifest_path);
                             if self.current == Screen::ConfigValidate {
@@ -154,6 +162,8 @@ impl App {
                 Err(TryRecvError::Disconnected) => {
                     // Worker vanished without a result; drop back to selection.
                     self.compiling = false;
+                    self.compile_progress = 0;
+                    self.compile_started_at = None;
                     self.compile_rx = None;
                     if self.current == Screen::ConfigValidate {
                         self.current = Screen::ConfigSelect;
@@ -189,6 +199,15 @@ impl App {
 
     pub(crate) fn on_tick(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
+        if self.compiling
+            && let Some(started) = self.compile_started_at {
+                // Cargo exposes no meaningful percentage for this tiny
+                // generated crate. Let the estimate advance smoothly while
+                // reserving 100% for the actual worker result.
+                self.compile_progress = self
+                    .compile_progress
+                    .max(estimated_compile_progress(started.elapsed()));
+            }
         if self.hardware_detecting
             || self.compiling
             || self.custom_fetching
@@ -203,5 +222,45 @@ impl App {
 
     pub(crate) fn splash_lines_visible(&self, max_lines: u16) -> usize {
         (self.tick_count as usize).min(max_lines as usize)
+    }
+
+    /// Software blink for terminals that ignore ANSI SLOW_BLINK (Linux VT /
+    /// fbcon on bare metal). ~530 ms on / off at the 30 ms app tick.
+    pub(crate) fn blink_on(&self) -> bool {
+        const HALF_PERIOD_TICKS: u64 = 18;
+        (self.tick_count / HALF_PERIOD_TICKS).is_multiple_of(2)
+    }
+}
+
+/// A deliberately conservative, time-based estimate for config compilation.
+/// It moves quickly for a warm cache, then slows and caps at 95% for cold or
+/// unusually slow builds. Only `CompileEvent::Done(Ok(_))` represents success.
+fn estimated_compile_progress(elapsed: Duration) -> u16 {
+    let seconds = elapsed.as_secs_f64();
+    let percent = if seconds <= 1.0 {
+        5.0 + 30.0 * seconds
+    } else if seconds <= 5.0 {
+        35.0 + 35.0 * ((seconds - 1.0) / 4.0)
+    } else if seconds <= 15.0 {
+        70.0 + 18.0 * ((seconds - 5.0) / 10.0)
+    } else {
+        88.0 + (7.0 * ((seconds - 15.0) / 15.0)).min(7.0)
+    };
+    (percent.floor() as u16).min(95)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::estimated_compile_progress;
+    use std::time::Duration;
+
+    #[test]
+    fn compile_estimate_advances_but_never_claims_completion() {
+        let samples = [0, 1, 5, 15, 30, 300]
+            .map(|seconds| estimated_compile_progress(Duration::from_secs(seconds)));
+
+        assert_eq!(samples[0], 5);
+        assert!(samples.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(samples.last(), Some(&95));
     }
 }

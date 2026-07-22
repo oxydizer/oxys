@@ -22,6 +22,8 @@ const MAX_TRANSACTION_SIZE: u64 = 64 * 1024;
 const OPERATION_LOCK: &str = "var/lib/oxys/operation.lock";
 const PORTAGE_VDB_LOCK: &str = "var/db/pkg";
 const MAX_CONFIG_UPDATES: u32 = 10_000;
+const HOLD_FILE: &str = "etc/portage/package.mask/oxys";
+const HOLD_HEADER: &str = "# Managed by oxys - do not edit.\n# Version holds for packages installed from .oxys artifacts.\n";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Receipt {
@@ -32,6 +34,8 @@ struct Receipt {
     transaction: String,
     #[serde(default)]
     world_added: bool,
+    #[serde(default)]
+    hold_added: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -43,6 +47,8 @@ struct Transaction {
     started_at: String,
     #[serde(default)]
     world_added: bool,
+    #[serde(default)]
+    hold_added: bool,
 }
 
 pub(crate) fn install(
@@ -107,6 +113,10 @@ pub(crate) fn install(
     // rather than maintaining a second persistent ownership database.
     preflight_install_ownership(&root, root_path, artifact, resuming_install)?;
     root.preflight_hardlinks(&artifact.files)?;
+    // Surface a user-managed etc/portage/package.mask regular file as a clear
+    // error before any journal or payload state exists, instead of a raw
+    // ENOTDIR when the version hold is committed after the payload.
+    root.preflight_control_directory(HOLD_FILE)?;
     let config_updates = plan_config_updates(&root, artifact)?;
 
     let cache_relative = cache_path(digest);
@@ -136,6 +146,7 @@ pub(crate) fn install(
         phase: "installing".into(),
         started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
         world_added: false,
+        hold_added: false,
     };
     if resuming_install {
         transaction = existing_transaction.expect("resuming install has a transaction");
@@ -231,6 +242,13 @@ pub(crate) fn install(
             &transaction_relative,
             &mut transaction,
         )?;
+        add_hold(
+            &root,
+            &artifact.metadata.portage.category,
+            &artifact.metadata.portage.pf,
+            &transaction_relative,
+            &mut transaction,
+        )?;
         let now = Utc::now();
         let receipt = Receipt {
             package: expected_package,
@@ -239,6 +257,7 @@ pub(crate) fn install(
             installed_at: now.to_rfc3339_opts(SecondsFormat::Secs, true),
             transaction: format!("{}-{}", now.format("%Y%m%dT%H%M%SZ"), &hex(digest)[..12]),
             world_added: transaction.world_added,
+            hold_added: transaction.hold_added,
         };
         let rendered = toml::to_string(&receipt)?;
         root.write_control(&receipt_relative, rendered.as_bytes(), 0o644)?;
@@ -289,6 +308,13 @@ pub(crate) fn remove(root_path: &Path, package: &str) -> Result<()> {
         return Err(PackageError::invalid(
             "receipt, cached artifact, and requested package do not agree",
         ));
+    }
+
+    if receipt.hold_added {
+        // Surface a user-managed etc/portage/package.mask regular file as a
+        // clear error before any payload deletion, not as a raw ENOTDIR when
+        // the hold is pruned after the files are already gone.
+        root.preflight_control_directory(HOLD_FILE)?;
     }
 
     let installed_package = format!("{category}/{pf}");
@@ -342,6 +368,7 @@ pub(crate) fn remove(root_path: &Path, package: &str) -> Result<()> {
                 phase: "removing".into(),
                 started_at: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
                 world_added: receipt.world_added,
+                hold_added: receipt.hold_added,
             },
         )?;
     }
@@ -378,6 +405,9 @@ pub(crate) fn remove(root_path: &Path, package: &str) -> Result<()> {
     }
     if receipt.world_added {
         remove_from_world(&root, &artifact.metadata.name)?;
+    }
+    if receipt.hold_added {
+        remove_hold(&root, category, pf)?;
     }
     root.remove_control(&receipt_relative)?;
     root.remove_control(&transaction_relative)?;
@@ -673,6 +703,70 @@ fn add_to_world(
     updated.push('\n');
     root.write_control(path, updated.as_bytes(), 0o644)?;
     Ok(())
+}
+
+fn hold_atom(category: &str, pf: &str) -> String {
+    format!(">{category}/{pf}")
+}
+
+/// Register a Portage version hold so `emerge -uDN @world` cannot upgrade
+/// over the oxys-managed package when the tree carries a newer version. The
+/// VDB entry remains the source of truth; the hold only pins the ceiling.
+fn add_hold(
+    root: &SafeRoot,
+    category: &str,
+    pf: &str,
+    transaction_path: &str,
+    transaction: &mut Transaction,
+) -> Result<()> {
+    let atom = hold_atom(category, pf);
+    let existing = read_control_optional(root, HOLD_FILE, MAX_WORLD_SIZE)?;
+    if existing
+        .as_deref()
+        .is_some_and(|content| content.lines().any(|line| line.trim() == atom))
+    {
+        // A pre-existing hold line stays user-owned; removal must not prune it.
+        return Ok(());
+    }
+    // Record ownership of the future hold line before committing it. This
+    // makes a crash on either side of the fragment rename recoverable.
+    transaction.hold_added = true;
+    write_transaction(root, transaction_path, transaction)?;
+    let mut updated = existing.unwrap_or_else(|| HOLD_HEADER.to_owned());
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(&atom);
+    updated.push('\n');
+    root.write_control(HOLD_FILE, updated.as_bytes(), 0o644)?;
+    Ok(())
+}
+
+fn remove_hold(root: &SafeRoot, category: &str, pf: &str) -> Result<()> {
+    let atom = hold_atom(category, pf);
+    let Some(existing) = read_control_optional(root, HOLD_FILE, MAX_WORLD_SIZE)? else {
+        return Ok(());
+    };
+    let mut updated = String::new();
+    let mut holds_remain = false;
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed == atom {
+            continue;
+        }
+        if !trimmed.is_empty() && !trimmed.starts_with('#') {
+            holds_remain = true;
+        }
+        updated.push_str(line);
+        updated.push('\n');
+    }
+    if holds_remain {
+        root.write_control(HOLD_FILE, updated.as_bytes(), 0o644)
+    } else {
+        // Only the oxys header (and blank lines) are left; drop the fragment
+        // instead of keeping an empty stub in the user's /etc/portage.
+        root.remove_control(HOLD_FILE)
+    }
 }
 
 fn remove_from_world(root: &SafeRoot, atom: &str) -> Result<()> {

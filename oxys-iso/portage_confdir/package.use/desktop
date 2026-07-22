@@ -17,7 +17,17 @@ sys-auth/seatd server
 # OpenRC sessions launch PipeWire through gentoo-pipewire-launcher. Make it the
 # complete desktop audio server: pipewire-pulse serves PulseAudio applications,
 # while pipewire-alsa routes native ALSA applications into the same graph.
-media-video/pipewire sound-server pipewire-alsa
+# Include the BlueZ SPA plugin so Bluetooth headsets appear as PipeWire audio
+# devices rather than only being pairable through bluetoothd.
+media-video/pipewire sound-server pipewire-alsa bluetooth
+
+# Match the x86-64-v3 binhost build and integrate removable media through the
+# udisks/gvfs stack already included in the desktop image.
+xfce-base/thunar udisks
+
+# Gentoo ships the USB-disk, Android/MTP, and camera backends as USE-controlled
+# components of gvfs rather than separate gvfs-mtp/gvfs-gphoto2 packages.
+gnome-base/gvfs udisks mtp gphoto2
 
 # freetype<->harfbuzz have a circular dependency, so the profile leaves freetype
 # built without harfbuzz by default. pango (via pangomm -> gtkmm -> pavucontrol)
